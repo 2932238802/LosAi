@@ -1,6 +1,6 @@
 use crate::{
     middleware::request_id,
-    routes::{admin, api, crud},
+    routes::{admin, analytics, api, crud},
     state::AppState,
 };
 use axum::{
@@ -47,7 +47,7 @@ pub fn router(s: AppState) -> Router {
         .route("/user/profile", get(api::user_profile))
         .route("/user/subscription", get(api::user_subscription))
         .route("/user/usage", get(api::user_usage))
-        .route("/user/request-logs", get(api::user_logs))
+        .route("/user/request-logs", get(analytics::user_logs))
         .route(
             "/user/api-keys",
             get(api::user_keys).post(api::user_create_key),
@@ -131,8 +131,10 @@ pub fn router(s: AppState) -> Router {
         .route("/admin/routes/{id}/check", post(crud::check_route))
         .route("/admin/dashboard", get(api::admin_dashboard))
         .route("/admin/usage", get(api::admin_usage))
-        .route("/admin/request-logs", get(api::admin_request_logs))
+        .route("/admin/request-logs", get(analytics::admin_logs))
+        .route("/admin/analytics/models", get(analytics::model_stats))
         .route("/admin/audit-logs", get(crud::audit_logs))
+        .route("/user/request-logs", get(analytics::user_logs))
         .layer(middleware::from_fn(request_id::request_id))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
