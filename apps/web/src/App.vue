@@ -38,7 +38,8 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined
 
 const loggedIn = computed(() => Boolean(token.value))
 const isAdmin = computed(() => role.value === 'ADMIN')
-const publicBaseUrl = computed(() => `${window.location.origin}/v1`)
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '' : 'https://api.losai.site')).replace(/\/+$/, '')
+const publicBaseUrl = computed(() => `${apiBaseUrl || window.location.origin}/v1`)
 const adminTitles: Record<AdminView, string> = { overview:'平台总览',users:'用户管理',plans:'套餐管理',keys:'平台 API 密钥',providers:'Provider 管理',credentials:'Provider 凭证',models:'模型管理',routes:'模型路由',usage:'平台使用量',logs:'请求日志',audit:'审计日志' }
 const userTitles: Record<UserView, string> = { overview:'账户总览',keys:'我的 API 密钥',usage:'使用量日志',logs:'请求日志',docs:'API 文档',profile:'账户资料' }
 
@@ -46,7 +47,7 @@ async function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
   if (init.body) headers.set('Content-Type', 'application/json')
   if (token.value) headers.set('Authorization', `Bearer ${token.value}`)
-  const response = await fetch(path, { ...init, headers })
+  const response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers })
   const body = response.status === 204 ? {} : await response.json().catch(() => ({}))
   if (!response.ok) {
     if (response.status === 401) logout()
