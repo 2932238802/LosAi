@@ -24,7 +24,13 @@ const adminView = ref<AdminView>('overview')
 const userView = ref<UserView>('overview')
 const dashboard = ref<Row>({})
 const rows = ref<Row[]>([])
-const users = ref<Row[]>([])
+const rowsLoading = ref(false)
+const rowsError = ref('')
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const totalPages = ref(0)
+
 const plans = ref<Row[]>([])
 const keys = ref<Row[]>([])
 const providers = ref<Row[]>([])
@@ -87,8 +93,33 @@ async function loadAdminView(){if(!isAdmin.value)return;const map:Partial<Record
 async function selectAdmin(view:AdminView){adminView.value=view;error.value='';try{await loadAdminView()}catch(e){fail(e,'加载数据失败')}}
 
 async function loadUserAll(){const results=await Promise.allSettled(['/user/dashboard','/user/profile','/user/subscription','/user/api-keys','/v1/models'].map(path=>request(path)));const value=(i:number)=>results[i].status==='fulfilled'?(results[i] as PromiseFulfilledResult<any>).value:{};dashboard.value=value(0);profile.value=value(1);subscription.value=value(2);keys.value=list(value(3));models.value=list(value(4));await loadUserView()}
-async function loadUserView(){const map:Partial<Record<UserView,string>>={keys:'/user/api-keys',usage:'/user/usage',logs:'/user/request-logs'};const path=map[userView.value];if(path)rows.value=list(await request(path));else rows.value=[]}
-async function selectUser(view:UserView){userView.value=view;try{await loadUserView()}catch(e){fail(e,'加载数据失败')}}
+async function loadUserView(){
+  const map:Partial<Record<UserView,string>>={keys:'/user/api-keys',usage:'/user/usage',logs:'/user/request-logs'}
+  const path=map[userView.value]
+  if(!path){rows.value=[];total.value=0;totalPages.value=0;return}
+  rowsLoading.value=true
+  rowsError.value=''
+  try{
+    const result=await request(`${path}?page=${page.value}&page_size=${pageSize.value}`)
+    rows.value=list(result)
+    total.value=Number(result.total||0)
+    totalPages.value=Number(result.total_pages||0)
+  }catch(e){
+    rows.value=[]
+    total.value=0
+    totalPages.value=0
+    rowsError.value=e instanceof Error?e.message:'加载日志失败'
+    throw e
+  }finally{rowsLoading.value=false}
+}
+async function selectUser(view:UserView){userView.value=view;page.value=1;error.value='';try{await loadUserView()}catch(e){fail(e,'加载数据失败')}}
+async function changeUserPage(next:number){
+  if(next<1 || (totalPages.value>0 && next>totalPages.value) || rowsLoading.value)return
+  page.value=next
+  try{await loadUserView()}catch(e){fail(e,'加载日志失败')}
+}
+function copyRequestId(value:string){copyText(value,'请求 ID 已复制')}
+
 
 function openCreate(kind:string){editing.value=null;modal.value=kind;form.value=defaults(kind)}
 function openEdit(kind:string,item:Row){editing.value=item;modal.value=kind;const copy={...item,password:'',secret:''};if(copy.expires_at)copy.expires_at=new Date(copy.expires_at).toISOString().slice(0,16);form.value=copy}
@@ -162,7 +193,7 @@ onMounted(async()=>{if(!loggedIn.value)return;try{if(isAdmin.value)await loadAdm
           <div v-else class="docs-section"><div class="limit-grid"><article><small>RPM</small><strong>{{subscription.rpm_limit || '—'}}</strong><span>每分钟请求数</span></article><article><small>TPM</small><strong>{{subscription.tpm_limit || '不限'}}</strong><span>每分钟 Token 预估上限</span></article><article><small>并发</small><strong>{{subscription.max_concurrency || '—'}}</strong><span>同时处理的请求数</span></article><article><small>Credits</small><strong>{{dashboard.balance ?? '—'}}</strong><span>当前可用余额</span></article></div><h3>常见错误</h3><div class="error-table"><div><code>401</code><span><b>INVALID_API_KEY</b> — API Key 不存在、已失效或未携带。</span></div><div><code>403</code><span><b>KEY_DISABLED / KEY_EXPIRED</b> — 密钥已禁用或已过期。</span></div><div><code>402</code><span><b>INSUFFICIENT_CREDITS</b> — 余额不足，请充值或联系管理员。</span></div><div><code>429</code><span><b>RATE_LIMIT_EXCEEDED / CONCURRENCY_LIMIT</b> — 超过 RPM 或并发限制，请稍后重试。</span></div><div><code>404</code><span><b>MODEL_NOT_AVAILABLE</b> — 模型未开放或没有健康路由。</span></div></div><p class="docs-note">每次请求都有 <code>request_id</code>。联系管理员排查问题时，请提供这个 ID，不要提供 API Key 或完整请求内容。</p></div>
         </section>
         <section v-else-if="userView==='profile'" class="panel"><h2>账户资料</h2><dl><dt>邮箱</dt><dd>{{profile.email}}</dd><dt>角色</dt><dd>普通用户</dd><dt>账户状态</dt><dd>{{profile.enabled?'已启用':'已禁用'}}</dd><dt>当前套餐</dt><dd>{{subscription.name||'未订阅'}}</dd><dt>RPM / TPM / 并发</dt><dd>{{subscription.rpm_limit||0}} / {{subscription.tpm_limit||0}} / {{subscription.max_concurrency||0}}</dd></dl></section>
-        <section v-else class="panel"><div class="panel-head"><h2>{{userTitles[userView]}}</h2><button v-if="userView==='keys'" @click="openCreate('key')">创建密钥</button></div><div class="table-wrap"><table><thead><tr><template v-if="userView==='keys'"><th>名称</th><th>前缀</th><th>状态</th><th>创建时间</th><th>操作</th></template><template v-else-if="userView==='usage'"><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>Credits</th><th>状态</th></template><template v-else><th>时间</th><th>请求 ID</th><th>模型</th><th>状态码</th><th>延迟</th><th>错误</th></template></tr></thead><tbody><tr v-for="item in rows" :key="item.id||item.request_id"><template v-if="userView==='keys'"><td>{{item.name}}</td><td>{{item.key_prefix}}••••</td><td>{{item.enabled?'启用':'禁用'}}</td><td>{{fmt(item.created_at)}}</td><td class="actions"><button class="small" @click="openEdit('key',item)">编辑</button><button class="small" @click="setStatus('key',item,!item.enabled)">{{item.enabled?'禁用':'启用'}}</button><button class="small danger" @click="remove('key',item)">删除</button></td></template><template v-else-if="userView==='usage'"><td>{{fmt(item.created_at)}}</td><td>{{item.model}}</td><td>{{item.input_tokens}}</td><td>{{item.output_tokens}}</td><td>{{item.credits}}</td><td>{{item.status}}</td></template><template v-else><td>{{fmt(item.created_at)}}</td><td>{{item.request_id}}</td><td>{{item.model}}</td><td>{{item.status_code}}</td><td>{{item.latency_ms}} ms</td><td>{{item.error_code||'—'}}</td></template></tr><tr v-if="rows.length===0"><td colspan="7" class="empty">暂无数据</td></tr></tbody></table></div></section>
+        <section v-else class="panel"><div class="panel-head"><div><h2>{{userTitles[userView]}}</h2><p v-if="userView==='usage'||userView==='logs'" class="panel-subtitle">共 {{total}} 条记录 · 第 {{page}} / {{totalPages||1}} 页</p></div><button v-if="userView==='keys'" @click="openCreate('key')">创建密钥</button></div><div v-if="rowsError" class="load-error">{{rowsError}} <button class="small" @click="loadUserView">重试</button></div><div class="table-wrap"><table><thead><tr><template v-if="userView==='keys'"><th>名称</th><th>前缀</th><th>状态</th><th>创建时间</th><th>操作</th></template><template v-else-if="userView==='usage'"><th>时间</th><th>请求 ID</th><th>模型</th><th>输入</th><th>输出</th><th>总 Token</th><th>Credits</th><th>流式</th><th>状态</th></template><template v-else><th>时间</th><th>请求 ID</th><th>模型</th><th>状态码</th><th>延迟</th><th>流式</th><th>错误</th></template></tr></thead><tbody><tr v-if="rowsLoading"><td :colspan="userView==='keys'?5:userView==='usage'?9:7" class="empty">加载中…</td></tr><template v-else><tr v-for="item in rows" :key="item.id||item.request_id"><template v-if="userView==='keys'"><td>{{item.name}}</td><td>{{item.key_prefix}}••••</td><td><span class="state-pill" :class="item.enabled?'ok':'muted'">{{item.enabled?'启用':'禁用'}}</span></td><td>{{fmt(item.created_at)}}</td><td class="actions"><button class="small" @click="openEdit('key',item)">编辑</button><button class="small" @click="setStatus('key',item,!item.enabled)">{{item.enabled?'禁用':'启用'}}</button><button class="small danger" @click="remove('key',item)">删除</button></td></template><template v-else-if="userView==='usage'"><td>{{fmt(item.created_at)}}</td><td><button class="link-button" @click="copyRequestId(item.request_id)">{{String(item.request_id).slice(0,8)}}…</button></td><td>{{item.model||'—'}}</td><td>{{item.input_tokens}}</td><td>{{item.output_tokens}}</td><td>{{(item.total_tokens ?? Number(item.input_tokens||0)+Number(item.output_tokens||0))}}</td><td>{{item.credits}}</td><td>{{item.stream?'是':'否'}}</td><td><span class="state-pill ok">{{item.status}}</span></td></template><template v-else><td>{{fmt(item.created_at)}}</td><td><button class="link-button" @click="copyRequestId(item.request_id)">{{String(item.request_id).slice(0,8)}}…</button></td><td>{{item.model||'—'}}</td><td><span class="state-pill" :class="item.status_code>=400?'bad':'ok'">{{item.status_code}}</span></td><td>{{item.latency_ms}} ms</td><td>{{item.stream?'是':'否'}}</td><td>{{item.error_code||'—'}}</td></template></tr><tr v-if="rows.length===0"><td :colspan="userView==='keys'?5:userView==='usage'?9:7" class="empty">暂无数据</td></tr></template></tbody></table></div><div v-if="userView==='usage'||userView==='logs'" class="pagination"><button class="secondary small" :disabled="page<=1||rowsLoading" @click="changeUserPage(page-1)">上一页</button><span>第 {{page}} / {{totalPages||1}} 页</span><button class="secondary small" :disabled="totalPages===0||page>=totalPages||rowsLoading" @click="changeUserPage(page+1)">下一页</button></div></section>
       </template>
     </main>
   </div>

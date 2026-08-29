@@ -366,10 +366,41 @@ pub async fn user_usage(
     let claims = user(&state, &headers)?;
     let size = q.page_size.unwrap_or(20).clamp(1, 100);
     let page = q.page.unwrap_or(1).max(1);
-    let rows=sqlx::query("SELECT request_id,model,input_tokens,output_tokens,credits,status,created_at FROM usage_records WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3").bind(claims.sub).bind(size).bind((page-1)*size).fetch_all(&state.db).await.map_err(|_|GatewayError::Internal)?;
-    Ok(Json(
-        serde_json::json!({"data":rows.iter().map(|r|serde_json::json!({"request_id":r.get::<Uuid,_>("request_id"),"model":r.get::<String,_>("model"),"input_tokens":r.get::<i64,_>("input_tokens"),"output_tokens":r.get::<i64,_>("output_tokens"),"credits":r.get::<i64,_>("credits"),"status":r.get::<String,_>("status"),"created_at":r.get::<DateTime<Utc>,_>("created_at")})).collect::<Vec<_>>(),"page":page,"page_size":size}),
-    ))
+    let offset = (page - 1) * size;
+    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_records WHERE user_id=$1")
+        .bind(claims.sub)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let rows = sqlx::query("SELECT request_id,model,input_tokens,output_tokens,credits,stream,status,created_at FROM usage_records WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3")
+        .bind(claims.sub)
+        .bind(size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let total_pages = if total == 0 {
+        0
+    } else {
+        (total + size - 1) / size
+    };
+    Ok(Json(serde_json::json!({
+        "data": rows.iter().map(|r| serde_json::json!({
+            "request_id": r.get::<Uuid, _>("request_id"),
+            "model": r.get::<String, _>("model"),
+            "input_tokens": r.get::<i64, _>("input_tokens"),
+            "output_tokens": r.get::<i64, _>("output_tokens"),
+            "total_tokens": r.get::<i64, _>("input_tokens") + r.get::<i64, _>("output_tokens"),
+            "credits": r.get::<i64, _>("credits"),
+            "stream": r.get::<bool, _>("stream"),
+            "status": r.get::<String, _>("status"),
+            "created_at": r.get::<DateTime<Utc>, _>("created_at"),
+        })).collect::<Vec<_>>(),
+        "page": page,
+        "page_size": size,
+        "total": total,
+        "total_pages": total_pages,
+    })))
 }
 pub async fn user_logs(
     State(state): State<AppState>,
@@ -379,10 +410,42 @@ pub async fn user_logs(
     let claims = user(&state, &headers)?;
     let size = q.page_size.unwrap_or(20).clamp(1, 100);
     let page = q.page.unwrap_or(1).max(1);
-    let rows=sqlx::query("SELECT request_id,model,status_code,latency_ms,error_code,created_at FROM request_logs WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3").bind(claims.sub).bind(size).bind((page-1)*size).fetch_all(&state.db).await.map_err(|_|GatewayError::Internal)?;
-    Ok(Json(
-        serde_json::json!({"data":rows.iter().map(|r|serde_json::json!({"request_id":r.get::<Uuid,_>("request_id"),"model":r.get::<Option<String>,_>("model"),"status_code":r.get::<i32,_>("status_code"),"latency_ms":r.get::<i64,_>("latency_ms"),"error_code":r.get::<Option<String>,_>("error_code"),"created_at":r.get::<DateTime<Utc>,_>("created_at")})).collect::<Vec<_>>(),"page":page,"page_size":size}),
-    ))
+    let offset = (page - 1) * size;
+    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_logs WHERE user_id=$1")
+        .bind(claims.sub)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let rows = sqlx::query("SELECT request_id,model,status_code,latency_ms,error_code,stream,input_tokens,output_tokens,credits,created_at FROM request_logs WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3")
+        .bind(claims.sub)
+        .bind(size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let total_pages = if total == 0 {
+        0
+    } else {
+        (total + size - 1) / size
+    };
+    Ok(Json(serde_json::json!({
+        "data": rows.iter().map(|r| serde_json::json!({
+            "request_id": r.get::<Uuid, _>("request_id"),
+            "model": r.get::<Option<String>, _>("model"),
+            "status_code": r.get::<i32, _>("status_code"),
+            "latency_ms": r.get::<i64, _>("latency_ms"),
+            "error_code": r.get::<Option<String>, _>("error_code"),
+            "stream": r.get::<bool, _>("stream"),
+            "input_tokens": r.get::<i64, _>("input_tokens"),
+            "output_tokens": r.get::<i64, _>("output_tokens"),
+            "credits": r.get::<i64, _>("credits"),
+            "created_at": r.get::<DateTime<Utc>, _>("created_at"),
+        })).collect::<Vec<_>>(),
+        "page": page,
+        "page_size": size,
+        "total": total,
+        "total_pages": total_pages,
+    })))
 }
 
 pub async fn admin_dashboard(
