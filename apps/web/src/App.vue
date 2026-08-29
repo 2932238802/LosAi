@@ -32,6 +32,7 @@ const total = ref(0)
 const totalPages = ref(0)
 
 const plans = ref<Row[]>([])
+const users = ref<Row[]>([])
 const keys = ref<Row[]>([])
 const providers = ref<Row[]>([])
 const credentials = ref<Row[]>([])
@@ -80,6 +81,17 @@ function docsCode(tab = docsCodeTab.value) {
   if (tab === 'python') return `from openai import OpenAI\n\nclient = OpenAI(\n    api_key="sk-gw_你的密钥",\n    base_url="${base}"\n)\n\nresponse = client.chat.completions.create(\n    model="${model}",\n    messages=[{"role": "user", "content": "你好"}],\n    stream=${docsStream.value ? 'True' : 'False'}\n)\n\nif ${docsStream.value ? 'True' : 'False'}:\n    for chunk in response:\n        print(chunk.choices[0].delta.content or "", end="")\nelse:\n    print(response.choices[0].message.content)`
   if (tab === 'javascript') return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  apiKey: "sk-gw_你的密钥",\n  baseURL: "${base}"\n});\n\nconst response = await client.chat.completions.create({\n  model: "${model}",\n  messages: [{ role: "user", content: "你好" }],\n  stream: ${docsStream.value}\n});\n\nif (${docsStream.value}) {\n  for await (const chunk of response) {\n    process.stdout.write(chunk.choices[0]?.delta?.content || "");\n  }\n} else {\n  console.log(response.choices[0].message.content);\n}`
   return `curl ${base}/chat/completions \\\n  -N \\\n  -H "Authorization: Bearer sk-gw_你的密钥" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model, messages: [{ role: 'user', content: '你好' }], stream: docsStream.value })}'`
+}
+
+function logout(){
+  token.value=''
+  role.value=''
+  localStorage.removeItem('lostoken_token')
+  localStorage.removeItem('lostoken_role')
+  rows.value=[]
+  rowsError.value=''
+  total.value=0
+  totalPages.value=0
 }
 
 async function authenticate(){ busy.value=true;error.value='';try{const path=authMode.value==='login'?'/auth/login':'/auth/register';const payload=authMode.value==='login'?{email:email.value,password:password.value}:{email:email.value,password:password.value,confirm_password:confirmPassword.value};const result=await request(path,{method:'POST',body:JSON.stringify(payload)});token.value=result.access_token;role.value=result.role||'CUSTOMER';localStorage.setItem('lostoken_token',token.value);localStorage.setItem('lostoken_role',role.value);if(isAdmin.value) await loadAdminAll();else await loadUserAll()}catch(e){error.value=e instanceof Error?e.message:'认证失败'}finally{busy.value=false}}
