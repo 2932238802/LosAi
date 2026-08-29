@@ -134,7 +134,6 @@ pub fn router(s: AppState) -> Router {
         .route("/admin/request-logs", get(analytics::admin_logs))
         .route("/admin/analytics/models", get(analytics::model_stats))
         .route("/admin/audit-logs", get(crud::audit_logs))
-        .route("/user/request-logs", get(analytics::user_logs))
         .layer(middleware::from_fn(request_id::request_id))
         .layer(cors)
         .layer(TraceLayer::new_for_http())

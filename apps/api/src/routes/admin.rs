@@ -398,24 +398,35 @@ pub async fn delete_model(
 ) -> Result<Json<serde_json::Value>> {
     let claims = check_admin(&state, &headers)?;
     let mut tx = state.db.begin().await.map_err(|_| GatewayError::Internal)?;
-    sqlx::query("UPDATE model_routes SET enabled=false, updated_at=now() WHERE model_id=$1")
+
+    let deleted = sqlx::query_scalar::<_, Uuid>("DELETE FROM models WHERE id=$1 RETURNING id")
         .bind(id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| GatewayError::Internal)?;
-    let result = sqlx::query("DELETE FROM models WHERE id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| GatewayError::Internal)?;
-    if result.rows_affected() == 0 {
+
+    if deleted.is_none() {
         return Err(GatewayError::Validation("模型不存在或已经删除".to_owned()));
     }
+
+    let still_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM models WHERE id=$1)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| GatewayError::Internal)?;
+
+    if still_exists {
+        return Err(GatewayError::Internal);
+    }
+
     tx.commit().await.map_err(|_| GatewayError::Internal)?;
     super::api::audit(&state, claims.sub, "DELETE", "MODEL", id).await;
-    Ok(Json(
-        serde_json::json!({"id": id, "message": "模型已删除，关联路由已停用"}),
-    ))
+    Ok(Json(serde_json::json!({
+        "deleted": true,
+        "id": id,
+        "message": "模型已删除"
+    })))
 }
 
 pub async fn update_model_status(
