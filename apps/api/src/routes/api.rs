@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Extension, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{
         HeaderMap, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
@@ -52,6 +52,7 @@ pub struct PlanIn {
     pub rpm_limit: i32,
     pub tpm_limit: Option<i32>,
     pub max_concurrency: i32,
+    pub monthly_request_limit: i64,
 }
 #[derive(Deserialize)]
 pub struct KeyIn {
@@ -71,6 +72,12 @@ pub struct Chat {
 pub struct PageQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct CreditChange {
+    pub amount: i64,
+    pub description: Option<String>,
 }
 
 fn bearer(headers: &HeaderMap) -> Result<&str> {
@@ -199,9 +206,9 @@ pub async fn list_plans(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>> {
     admin(&state, &headers)?;
-    let rows=sqlx::query("SELECT id,name,monthly_credits,rpm_limit,tpm_limit,max_concurrency,enabled FROM plans ORDER BY created_at DESC").fetch_all(&state.db).await.map_err(|_|GatewayError::Internal)?;
+    let rows=sqlx::query("SELECT id,name,monthly_credits,rpm_limit,tpm_limit,max_concurrency,monthly_request_limit,enabled FROM plans ORDER BY created_at DESC").fetch_all(&state.db).await.map_err(|_|GatewayError::Internal)?;
     Ok(Json(
-        serde_json::json!({"data":rows.iter().map(|r|row_json(r,&[("id","uuid"),("name","text"),("monthly_credits","i64"),("rpm_limit","i32"),("tpm_limit","i32"),("max_concurrency","i32"),("enabled","bool")])).collect::<Vec<_>>() }),
+        serde_json::json!({"data":rows.iter().map(|r|row_json(r,&[("id","uuid"),("name","text"),("monthly_credits","i64"),("rpm_limit","i32"),("tpm_limit","i32"),("max_concurrency","i32"),("monthly_request_limit","i64"),("enabled","bool")])).collect::<Vec<_>>() }),
     ))
 }
 pub async fn create_plan(
@@ -217,7 +224,7 @@ pub async fn create_plan(
     {
         return Err(GatewayError::Validation("套餐参数无效".to_owned()));
     }
-    let id=sqlx::query_scalar::<_,Uuid>("INSERT INTO plans(name,monthly_credits,rpm_limit,tpm_limit,max_concurrency) VALUES($1,$2,$3,$4,$5) RETURNING id").bind(input.name.trim()).bind(input.monthly_credits).bind(input.rpm_limit).bind(input.tpm_limit.unwrap_or(0)).bind(input.max_concurrency).fetch_one(&state.db).await.map_err(|_|GatewayError::Validation("套餐名称已存在或参数无效".to_owned()))?;
+    let id=sqlx::query_scalar::<_,Uuid>("INSERT INTO plans(name,monthly_credits,rpm_limit,tpm_limit,max_concurrency,monthly_request_limit) VALUES($1,$2,$3,$4,$5,$6) RETURNING id").bind(input.name.trim()).bind(input.monthly_credits).bind(input.rpm_limit).bind(input.tpm_limit.unwrap_or(0)).bind(input.max_concurrency).bind(input.monthly_request_limit).fetch_one(&state.db).await.map_err(|_|GatewayError::Validation("套餐名称已存在或参数无效".to_owned()))?;
     audit(&state, claims.sub, "CREATE", "PLAN", id).await;
     Ok(Json(serde_json::json!({"id":id,"message":"套餐创建成功"})))
 }
@@ -448,6 +455,120 @@ pub async fn user_logs(
     })))
 }
 
+pub async fn admin_credit_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Json(input): Json<CreditChange>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = admin(&state, &headers)?;
+    if input.amount == 0 || input.description.as_deref().unwrap_or("").len() > 500 {
+        return Err(GatewayError::Validation(
+            "充值金额不能为 0，备注不能超过 500 个字符".to_owned(),
+        ));
+    }
+    let mut tx = state.db.begin().await.map_err(|_| GatewayError::Internal)?;
+    let before: i64 =
+        sqlx::query_scalar("SELECT credits_balance FROM users WHERE id=$1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| GatewayError::Internal)?
+            .ok_or(GatewayError::Validation("用户不存在".to_owned()))?;
+    let after = before
+        .checked_add(input.amount)
+        .ok_or(GatewayError::Validation("余额超出范围".to_owned()))?;
+    if after < 0 {
+        return Err(GatewayError::Validation("余额不能小于 0".to_owned()));
+    }
+    sqlx::query("UPDATE users SET credits_balance=$1,updated_at=now() WHERE id=$2")
+        .bind(after)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let kind = if input.amount > 0 {
+        "ADMIN_TOP_UP"
+    } else {
+        "ADMIN_ADJUSTMENT"
+    };
+    sqlx::query("INSERT INTO credit_ledger(user_id,amount,balance_before,balance_after,entry_type,description,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        .bind(user_id)
+        .bind(input.amount)
+        .bind(before)
+        .bind(after)
+        .bind(kind)
+        .bind(input.description.unwrap_or_default())
+        .bind(claims.sub)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    tx.commit().await.map_err(|_| GatewayError::Internal)?;
+    audit(&state, claims.sub, kind, "CREDITS", user_id).await;
+    Ok(Json(
+        serde_json::json!({"user_id": user_id, "balance": after, "message": "Credits 已更新"}),
+    ))
+}
+
+pub async fn user_credits_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = user(&state, &headers)?;
+    let size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let page = q.page.unwrap_or(1).max(1);
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_ledger WHERE user_id=$1")
+        .bind(claims.sub)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let rows = sqlx::query("SELECT id,amount,balance_before,balance_after,entry_type,description,request_id,created_at FROM credit_ledger WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3")
+        .bind(claims.sub)
+        .bind(size)
+        .bind((page - 1) * size)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let data = rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<Uuid, _>("id"), "amount": r.get::<i64, _>("amount"),
+        "balance_before": r.get::<i64, _>("balance_before"), "balance_after": r.get::<i64, _>("balance_after"),
+        "entry_type": r.get::<String, _>("entry_type"), "description": r.get::<String, _>("description"),
+        "request_id": r.get::<Option<Uuid>, _>("request_id"), "created_at": r.get::<DateTime<Utc>, _>("created_at")
+    })).collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"data": data, "page": page, "page_size": size, "total": total,
+        "total_pages": if total == 0 { 0 } else { (total + size - 1) / size }}),
+    ))
+}
+
+pub async fn admin_credits_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&state, &headers)?;
+    let size = q.page_size.unwrap_or(50).clamp(1, 100);
+    let page = q.page.unwrap_or(1).max(1);
+    let rows = sqlx::query("SELECT id,amount,balance_before,balance_after,entry_type,description,request_id,created_by,created_at FROM credit_ledger WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3")
+        .bind(user_id)
+        .bind(size)
+        .bind((page - 1) * size)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    Ok(Json(
+        serde_json::json!({"data": rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<Uuid, _>("id"), "amount": r.get::<i64, _>("amount"),
+        "balance_before": r.get::<i64, _>("balance_before"), "balance_after": r.get::<i64, _>("balance_after"),
+        "entry_type": r.get::<String, _>("entry_type"), "description": r.get::<String, _>("description"),
+        "request_id": r.get::<Option<Uuid>, _>("request_id"), "created_by": r.get::<Option<Uuid>, _>("created_by"),
+        "created_at": r.get::<DateTime<Utc>, _>("created_at")
+    })).collect::<Vec<_>>() }),
+    ))
+}
+
 pub async fn admin_dashboard(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -494,12 +615,33 @@ pub async fn chat(
     let started = Instant::now();
     let raw = bearer(&headers)?;
     let hash = crypto::hash_key(raw, &state.config.key_hash_pepper);
-    let key=sqlx::query("SELECT k.id,k.user_id,k.enabled,k.expires_at,u.enabled user_enabled,COALESCE(p.rpm_limit,60) rpm,COALESCE(p.tpm_limit,0) tpm,COALESCE(p.max_concurrency,2) concurrency FROM api_keys k JOIN users u ON u.id=k.user_id LEFT JOIN plans p ON p.id=u.plan_id WHERE k.key_hash=$1").bind(hash).fetch_optional(&state.db).await.map_err(|_|GatewayError::Internal)?.ok_or(GatewayError::InvalidApiKey)?;
+    let key=sqlx::query("SELECT k.id,k.user_id,k.enabled,k.expires_at,u.enabled user_enabled,u.credits_balance,p.enabled plan_enabled,p.monthly_request_limit,COALESCE(p.rpm_limit,60) rpm,COALESCE(p.tpm_limit,0) tpm,COALESCE(p.max_concurrency,2) concurrency FROM api_keys k JOIN users u ON u.id=k.user_id LEFT JOIN plans p ON p.id=u.plan_id WHERE k.key_hash=$1").bind(hash).fetch_optional(&state.db).await.map_err(|_|GatewayError::Internal)?.ok_or(GatewayError::InvalidApiKey)?;
     if !key.get::<bool, _>("enabled") {
         return Err(GatewayError::KeyDisabled);
     }
     if !key.get::<bool, _>("user_enabled") {
         return Err(GatewayError::UserDisabled);
+    }
+    if !key.get::<Option<bool>, _>("plan_enabled").unwrap_or(false) {
+        return Err(GatewayError::Validation(
+            "当前用户未配置有效套餐".to_owned(),
+        ));
+    }
+    if key.get::<i64, _>("credits_balance") <= 0 {
+        return Err(GatewayError::InsufficientCredits);
+    }
+    let monthly_limit = key
+        .get::<Option<i64>, _>("monthly_request_limit")
+        .unwrap_or(0);
+    if monthly_limit > 0 {
+        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE user_id=$1 AND created_at >= date_trunc('month', now())")
+            .bind(key.get::<Uuid, _>("user_id"))
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| GatewayError::Internal)?;
+        if used >= monthly_limit {
+            return Err(GatewayError::RateLimitExceeded);
+        }
     }
     if key
         .get::<Option<DateTime<Utc>>, _>("expires_at")
@@ -525,14 +667,15 @@ pub async fn chat(
         rpm_limit,
     )
     .await?;
-    let estimate = (serde_json::to_vec(&input.messages)
+    let estimate = serde_json::to_vec(&input.messages)
         .map(|v| (v.len() as i64 / 4).max(1))
-        .unwrap_or(1))
-        + input
-            .extra
-            .get("max_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        .unwrap_or(1);
+    let requested_output_tokens = input
+        .extra
+        .get("max_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024)
+        .clamp(1, 16384);
     limits::tpm(
         &mut redis,
         &format!("gateway:token-limit:{key_id}"),
@@ -602,6 +745,8 @@ pub async fn chat(
         let model = client_model.clone();
         let input_rate = route.get::<i64, _>("input_rate_micros");
         let output_rate = route.get::<i64, _>("output_rate_micros");
+        let estimated_input_tokens = estimate;
+        let estimated_output_tokens = requested_output_tokens;
         let body = async_stream::stream! {
             let mut input_tokens = 0i64;
             let mut output_tokens = 0i64;
@@ -624,8 +769,15 @@ pub async fn chat(
                     Err(_) => break,
                 }
             }
-            let credits = billing::calculate_credits(input_tokens, output_tokens, input_rate, output_rate).unwrap_or(0);
-            let entry = billing::Settlement { user_id, api_key_id: key_id, provider_id: Some(provider_id), credential_id: Some(credential_id), request_id, model, input_tokens, output_tokens, credits, stream: true, status: "COMPLETED", status_code: 200, latency_ms: started.elapsed().as_millis() as i64, error_code: None };
+            let reported_credits = billing::calculate_credits(input_tokens, output_tokens, input_rate, output_rate).unwrap_or(0);
+            let has_usage = input_tokens > 0 || output_tokens > 0;
+            let (final_input, final_output, credits, usage_source) = if has_usage {
+                (input_tokens, output_tokens, reported_credits, "PROVIDER_REPORTED")
+            } else {
+                let estimated = billing::calculate_credits(estimated_input_tokens, estimated_output_tokens, input_rate, output_rate).unwrap_or(0);
+                (estimated_input_tokens, estimated_output_tokens, estimated, "ESTIMATED")
+            };
+            let entry = billing::Settlement { user_id, api_key_id: key_id, provider_id: Some(provider_id), credential_id: Some(credential_id), request_id, model, input_tokens: final_input, output_tokens: final_output, credits, stream: true, status: "COMPLETED", status_code: 200, latency_ms: started.elapsed().as_millis() as i64, error_code: None, usage_source, precharged_credits: credits };
             let _ = billing::settle(&db, &entry).await;
         };
         return Ok((
@@ -645,14 +797,24 @@ pub async fn chat(
     let json: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| GatewayError::UpstreamError)?;
     let usage = json.get("usage").cloned().unwrap_or_default();
-    let input_tokens = usage
+    let reported_input_tokens = usage
         .get("prompt_tokens")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let output_tokens = usage
+    let reported_output_tokens = usage
         .get("completion_tokens")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
+    let has_usage = reported_input_tokens > 0 || reported_output_tokens > 0;
+    let (input_tokens, output_tokens, usage_source) = if has_usage {
+        (
+            reported_input_tokens,
+            reported_output_tokens,
+            "PROVIDER_REPORTED",
+        )
+    } else {
+        (estimate, requested_output_tokens, "ESTIMATED")
+    };
     let credits = billing::calculate_credits(
         input_tokens,
         output_tokens,
@@ -674,6 +836,8 @@ pub async fn chat(
         status_code: 200,
         latency_ms: started.elapsed().as_millis() as i64,
         error_code: None,
+        usage_source,
+        precharged_credits: credits,
     };
     billing::settle(&state.db, &entry).await?;
     Ok((StatusCode::OK, Json(json)).into_response())

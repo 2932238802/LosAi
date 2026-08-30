@@ -40,6 +40,8 @@ pub struct Settlement {
     pub status_code: i32,
     pub latency_ms: i64,
     pub error_code: Option<&'static str>,
+    pub usage_source: &'static str,
+    pub precharged_credits: i64,
 }
 
 pub async fn settle(pool: &PgPool, entry: &Settlement) -> Result<bool> {
@@ -58,10 +60,22 @@ pub async fn settle(pool: &PgPool, entry: &Settlement) -> Result<bool> {
     if changed == 0 {
         return Err(GatewayError::InsufficientCredits);
     }
-    sqlx::query("INSERT INTO usage_records(request_id,user_id,api_key_id,provider_id,credential_id,model,input_tokens,output_tokens,credits,stream,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
-        .bind(entry.request_id).bind(entry.user_id).bind(entry.api_key_id).bind(entry.provider_id).bind(entry.credential_id).bind(&entry.model).bind(entry.input_tokens).bind(entry.output_tokens).bind(entry.credits).bind(entry.stream).bind(entry.status)
+    let balance_after: i64 = sqlx::query_scalar("SELECT credits_balance FROM users WHERE id=$1")
+        .bind(entry.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| GatewayError::Internal)?;
+    let balance_before = balance_after
+        .checked_add(entry.credits)
+        .ok_or(GatewayError::Internal)?;
+    sqlx::query("INSERT INTO usage_records(request_id,user_id,api_key_id,provider_id,credential_id,model,input_tokens,output_tokens,credits,stream,status,usage_source,precharged_credits) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+        .bind(entry.request_id).bind(entry.user_id).bind(entry.api_key_id).bind(entry.provider_id).bind(entry.credential_id).bind(&entry.model).bind(entry.input_tokens).bind(entry.output_tokens).bind(entry.credits).bind(entry.stream).bind(entry.status).bind(entry.usage_source).bind(entry.precharged_credits)
         .execute(&mut *tx).await.map_err(|_| GatewayError::Internal)?;
-    sqlx::query("INSERT INTO request_logs(request_id,user_id,api_key_id,provider_id,model,status_code,latency_ms,error_code,stream,input_tokens,output_tokens,credits) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+    sqlx::query("INSERT INTO credit_ledger(user_id,amount,balance_before,balance_after,entry_type,description,request_id) VALUES($1,$2,$3,$4,'USAGE_DEBIT',$5,$6) ON CONFLICT DO NOTHING")
+        .bind(entry.user_id).bind(-entry.credits).bind(balance_before).bind(balance_after)
+        .bind(format!("API 使用: {}", entry.model)).bind(entry.request_id)
+        .execute(&mut *tx).await.map_err(|_| GatewayError::Internal)?;
+    sqlx::query("INSERT INTO request_logs(request_id,user_id,api_key_id,provider_id,model,status_code,latency_ms,error_code,stream,input_tokens,output_tokens,credits) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (request_id) DO UPDATE SET provider_id=EXCLUDED.provider_id,model=EXCLUDED.model,status_code=EXCLUDED.status_code,latency_ms=EXCLUDED.latency_ms,error_code=EXCLUDED.error_code,stream=EXCLUDED.stream,input_tokens=EXCLUDED.input_tokens,output_tokens=EXCLUDED.output_tokens,credits=EXCLUDED.credits")
         .bind(entry.request_id).bind(entry.user_id).bind(entry.api_key_id).bind(entry.provider_id).bind(&entry.model).bind(entry.status_code).bind(entry.latency_ms).bind(entry.error_code).bind(entry.stream).bind(entry.input_tokens).bind(entry.output_tokens).bind(entry.credits)
         .execute(&mut *tx).await.map_err(|_| GatewayError::Internal)?;
     tx.commit().await.map_err(|_| GatewayError::Internal)?;

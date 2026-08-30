@@ -48,6 +48,7 @@ pub fn router(s: AppState) -> Router {
         .route("/user/subscription", get(api::user_subscription))
         .route("/user/usage", get(api::user_usage))
         .route("/user/request-logs", get(analytics::user_logs))
+        .route("/user/credits/ledger", get(api::user_credits_ledger))
         .route(
             "/user/api-keys",
             get(api::user_keys).post(api::user_create_key),
@@ -64,6 +65,11 @@ pub fn router(s: AppState) -> Router {
             patch(crud::update_user).delete(crud::delete_user),
         )
         .route("/admin/users/{id}/status", patch(crud::update_user_status))
+        .route("/admin/users/{id}/credits", post(api::admin_credit_change))
+        .route(
+            "/admin/users/{id}/credits/ledger",
+            get(api::admin_credits_ledger),
+        )
         .route(
             "/admin/users/{id}/password",
             patch(crud::reset_user_password),
