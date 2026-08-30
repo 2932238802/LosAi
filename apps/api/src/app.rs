@@ -1,6 +1,6 @@
 use crate::{
     middleware::request_id,
-    routes::{admin, analytics, api, crud},
+    routes::{admin, analytics, api, crud, recharge},
     state::AppState,
 };
 use axum::{
@@ -42,6 +42,21 @@ pub fn router(s: AppState) -> Router {
         .route("/auth/login", post(api::login))
         .route("/auth/register", post(api::register))
         .route("/v1/models", get(api::models))
+        .route("/user/recharge-offers", get(recharge::user_offers))
+        .route(
+            "/user/recharge-orders",
+            get(recharge::user_orders).post(recharge::create_order),
+        )
+        .route(
+            "/admin/recharge-offers",
+            get(recharge::admin_offers).post(recharge::create_offer),
+        )
+        .route(
+            "/admin/recharge-offers/{id}",
+            patch(recharge::update_offer).delete(recharge::delete_offer),
+        )
+        .route("/admin/recharge-orders", get(recharge::admin_orders))
+        .route("/admin/recharge-orders/{id}", patch(recharge::review_order))
         .route("/v1/chat/completions", post(api::chat))
         .route("/user/dashboard", get(api::user_dashboard))
         .route("/user/profile", get(api::user_profile))

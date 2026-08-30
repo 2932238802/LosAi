@@ -743,27 +743,39 @@ pub async fn chat(
     let started = Instant::now();
     let raw = bearer(&headers)?;
     let hash = crypto::hash_key(raw, &state.config.key_hash_pepper);
-    let key=sqlx::query("SELECT k.id,k.user_id,k.enabled,k.expires_at,u.enabled user_enabled,u.credits_balance,p.enabled plan_enabled,p.monthly_request_limit,COALESCE(p.rpm_limit,60) rpm,COALESCE(p.tpm_limit,0) tpm,COALESCE(p.max_concurrency,2) concurrency FROM api_keys k JOIN users u ON u.id=k.user_id LEFT JOIN plans p ON p.id=u.plan_id WHERE k.key_hash=$1").bind(hash).fetch_optional(&state.db).await.map_err(|_|GatewayError::Internal)?.ok_or(GatewayError::InvalidApiKey)?;
+    let key = sqlx::query(
+        "SELECT k.id,k.user_id,k.enabled,k.expires_at,u.enabled user_enabled,u.credits_balance FROM api_keys k JOIN users u ON u.id=k.user_id WHERE k.key_hash=$1",
+    )
+    .bind(hash)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| GatewayError::Internal)?
+    .ok_or(GatewayError::InvalidApiKey)?;
     if !key.get::<bool, _>("enabled") {
         return Err(GatewayError::KeyDisabled);
     }
     if !key.get::<bool, _>("user_enabled") {
         return Err(GatewayError::UserDisabled);
     }
-    if !key.get::<Option<bool>, _>("plan_enabled").unwrap_or(false) {
-        return Err(GatewayError::Validation(
-            "当前用户未配置有效套餐".to_owned(),
-        ));
-    }
+    let client_model = input.model.clone();
+    let model_limits = sqlx::query("SELECT rpm_limit,tpm_limit,max_concurrency,monthly_request_limit FROM models WHERE model_name=$1 AND enabled")
+        .bind(&client_model)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| GatewayError::Internal)?
+        .ok_or(GatewayError::ModelNotAvailable)?;
+    let rpm_limit = model_limits.get::<i32, _>("rpm_limit") as i64;
+    let tpm_limit = model_limits.get::<i64, _>("tpm_limit");
+    let concurrency_limit = model_limits.get::<i32, _>("max_concurrency") as i64;
+    let monthly_limit = model_limits.get::<i64, _>("monthly_request_limit");
     if key.get::<i64, _>("credits_balance") <= 0 {
         return Err(GatewayError::InsufficientCredits);
     }
-    let monthly_limit = key
-        .get::<Option<i64>, _>("monthly_request_limit")
-        .unwrap_or(0);
+
     if monthly_limit > 0 {
-        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE user_id=$1 AND created_at >= date_trunc('month', now())")
+        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE user_id=$1 AND model=$2 AND created_at >= date_trunc('month', now())")
             .bind(key.get::<Uuid, _>("user_id"))
+            .bind(&client_model)
             .fetch_one(&state.db)
             .await
             .map_err(|_| GatewayError::Internal)?;
@@ -780,15 +792,7 @@ pub async fn chat(
     let key_id = key.get::<Uuid, _>("id");
     let user_id = key.get::<Uuid, _>("user_id");
     let mut redis = state.redis.clone();
-    let rpm_limit = key
-        .try_get::<i32, _>("rpm")
-        .map_err(|_| GatewayError::Internal)? as i64;
-    let tpm_limit = key
-        .try_get::<i32, _>("tpm")
-        .map_err(|_| GatewayError::Internal)? as i64;
-    let concurrency_limit = key
-        .try_get::<i32, _>("concurrency")
-        .map_err(|_| GatewayError::Internal)? as i64;
+
     limits::rpm(
         &mut redis,
         &format!("gateway:ratelimit:{key_id}"),

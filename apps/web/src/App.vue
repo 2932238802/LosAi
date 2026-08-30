@@ -3,13 +3,14 @@ import { computed, onMounted, ref } from 'vue'
 import LoginForm from './components/LoginForm.vue'
 import UserApiDocs from './components/UserApiDocs.vue'
 import UserPlans from './components/UserPlans.vue'
-import AdminPlanRequests from './components/AdminPlanRequests.vue'
+import UserRecharge from './components/UserRecharge.vue'
+import AdminRechargeOrders from './components/AdminRechargeOrders.vue'
 
 type Row = Record<string, any>
 type Role = 'ADMIN' | 'CUSTOMER' | ''
 type Toast = { type: 'success' | 'error' | 'info'; message: string }
-type AdminView = 'overview' | 'users' | 'plans' | 'plan-requests' | 'keys' | 'providers' | 'credentials' | 'models' | 'routes' | 'usage' | 'logs' | 'audit'
-type UserView = 'overview' | 'keys' | 'plans' | 'usage' | 'logs' | 'docs' | 'profile'
+type AdminView = 'overview' | 'users' | 'recharge-orders' | 'recharge-offers' | 'keys' | 'providers' | 'credentials' | 'models' | 'routes' | 'usage' | 'logs' | 'audit'
+type UserView = 'overview' | 'keys' | 'recharge' | 'usage' | 'logs' | 'docs' | 'profile'
 
 const token = ref(localStorage.getItem('lostoken_token') || '')
 const role = ref<Role>((localStorage.getItem('lostoken_role') as Role) || '')
@@ -47,6 +48,8 @@ const subscription = ref<Row>({})
 const billing = ref<Row>({})
 const userPlans = ref<Row[]>([])
 const planRequests = ref<Row[]>([])
+const rechargeOffers = ref<Row[]>([])
+const rechargeOrders = ref<Row[]>([])
 const form = ref<Row>({})
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -60,8 +63,8 @@ const docsStream = ref(false)
 const docsModel = ref('general-chat')
 const docsModels = computed(() => list(models.value.length ? models.value : dashboard.value.models))
 const selectedDocsModel = computed(() => docsModel.value || docsModels.value[0]?.id || 'general-chat')
-const adminTitles: Record<AdminView, string> = { overview: '平台总览', users: '用户管理', plans: '套餐管理', 'plan-requests': '套餐申请', keys: '平台 API 密钥', providers: 'Provider 管理', credentials: 'Provider 凭证', models: '模型管理', routes: '模型路由', usage: '平台使用量', logs: '请求日志', audit: '审计日志' }
-const userTitles: Record<UserView, string> = { overview: '账户总览', keys: '我的 API 密钥', plans: '套餐与余额', usage: '使用量日志', logs: '请求日志', docs: 'API 文档', profile: '账户资料' }
+const adminTitles: Record<AdminView, string> = { overview: '平台总览', users: '用户管理', 'recharge-orders': '充值订单', 'recharge-offers': '充值档位', keys: '平台 API 密钥', providers: 'Provider 管理', credentials: 'Provider 凭证', models: '模型管理', routes: '模型路由', usage: '平台使用量', logs: '请求日志', audit: '审计日志' }
+const userTitles: Record<UserView, string> = { overview: '账户总览', keys: '我的 API 密钥', recharge: 'Los 分充值', usage: '使用量日志', logs: '请求日志', docs: 'API 文档', profile: '账户资料' }
 
 async function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
@@ -80,7 +83,27 @@ function notify(message: string, type: Toast['type'] = 'success') { toast.value 
 function fail(cause: unknown, fallback = '操作失败') { notify(cause instanceof Error ? cause.message : fallback, 'error') }
 function fmt(value: any) { if (value === null || value === undefined || value === '') return '—'; if (typeof value === 'boolean') return value ? '启用' : '禁用'; if (typeof value === 'string' && value.includes('T')) return new Date(value).toLocaleString('zh-CN'); return String(value) }
 function copyText(value: string, message = '已复制到剪贴板') {
-  navigator.clipboard?.writeText(value).then(() => notify(message)).catch(() => notify('复制失败，请手动复制', 'error'))
+  const fallback = () => {
+    const area = document.createElement('textarea')
+    area.value = value
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.focus()
+    area.select()
+    const copied = document.execCommand('copy')
+    area.remove()
+    if (!copied) throw new Error('copy failed')
+  }
+  const task = navigator.clipboard?.writeText(value) ?? Promise.resolve().then(fallback)
+  task.then(() => notify(message)).catch(() => {
+    try {
+      fallback()
+      notify(message)
+    } catch {
+      notify('复制失败，请手动复制', 'error')
+    }
+  })
 }
 function docsCode(tab = docsCodeTab.value) {
   const model = selectedDocsModel.value
@@ -104,14 +127,14 @@ function logout() {
 async function authenticate() { busy.value = true; error.value = ''; try { const path = authMode.value === 'login' ? '/auth/login' : '/auth/register'; const payload = authMode.value === 'login' ? { email: email.value, password: password.value } : { email: email.value, password: password.value, confirm_password: confirmPassword.value }; const result = await request(path, { method: 'POST', body: JSON.stringify(payload) }); token.value = result.access_token; role.value = result.role || 'CUSTOMER'; localStorage.setItem('lostoken_token', token.value); localStorage.setItem('lostoken_role', role.value); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { error.value = e instanceof Error ? e.message : '认证失败' } finally { busy.value = false } }
 
 async function loadAdminAll() {
-  const results = await Promise.allSettled(['/admin/dashboard', '/admin/users', '/admin/plans', '/admin/api-keys', '/admin/providers', '/admin/credentials', '/admin/models', '/admin/routes', '/admin/plan-requests'].map(path => request(path)))
+  const results = await Promise.allSettled(['/admin/dashboard', '/admin/users', '/admin/api-keys', '/admin/providers', '/admin/credentials', '/admin/models', '/admin/routes', '/admin/recharge-orders', '/admin/recharge-offers'].map(path => request(path)))
   const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}
-  dashboard.value = value(0); users.value = list(value(1)); plans.value = list(value(2)); keys.value = list(value(3)); providers.value = list(value(4)); credentials.value = list(value(5)); models.value = list(value(6)); routes.value = list(value(7)); planRequests.value = list(value(8)); await loadAdminView()
+  dashboard.value = value(0); users.value = list(value(1)); keys.value = list(value(2)); providers.value = list(value(3)); credentials.value = list(value(4)); models.value = list(value(5)); routes.value = list(value(6)); rechargeOrders.value = list(value(7)); rechargeOffers.value = list(value(8)); await loadAdminView()
 }
-async function loadAdminView() { if (!isAdmin.value) return; const map: Partial<Record<AdminView, string>> = { users: '/admin/users', plans: '/admin/plans', 'plan-requests': '/admin/plan-requests', keys: '/admin/api-keys', providers: '/admin/providers', credentials: '/admin/credentials', models: '/admin/models', routes: '/admin/routes', usage: '/admin/usage', logs: '/admin/request-logs', audit: '/admin/audit-logs' }; const path = map[adminView.value]; if (path) rows.value = list(await request(path)); else rows.value = [] }
+async function loadAdminView() { if (!isAdmin.value) return; const map: Partial<Record<AdminView, string>> = { users: '/admin/users', 'recharge-orders': '/admin/recharge-orders', 'recharge-offers': '/admin/recharge-offers', keys: '/admin/api-keys', providers: '/admin/providers', credentials: '/admin/credentials', models: '/admin/models', routes: '/admin/routes', usage: '/admin/usage', logs: '/admin/request-logs', audit: '/admin/audit-logs' }; const path = map[adminView.value]; if (path) rows.value = list(await request(path)); else rows.value = [] }
 async function selectAdmin(view: AdminView) { adminView.value = view; error.value = ''; try { await loadAdminView() } catch (e) { fail(e, '加载数据失败') } }
 
-async function loadUserAll() { const results = await Promise.allSettled(['/user/dashboard', '/user/profile', '/user/subscription', '/user/api-keys', '/v1/models', '/user/plans', '/user/plan-requests', '/user/billing'].map(path => request(path))); const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}; dashboard.value = value(0); profile.value = value(1); subscription.value = value(2); keys.value = list(value(3)); models.value = list(value(4)); userPlans.value = list(value(5)); planRequests.value = list(value(6)); billing.value = value(7); await loadUserView() }
+async function loadUserAll() { const results = await Promise.allSettled(['/user/dashboard', '/user/profile', '/user/subscription', '/user/api-keys', '/v1/models', '/user/recharge-offers', '/user/recharge-orders', '/user/billing'].map(path => request(path))); const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}; dashboard.value = value(0); profile.value = value(1); keys.value = list(value(2)); models.value = list(value(3)); rechargeOffers.value = list(value(4)); rechargeOrders.value = list(value(5)); billing.value = value(6); await loadUserView() }
 async function loadUserView() {
   const map: Partial<Record<UserView, string>> = { keys: '/user/api-keys', usage: '/user/usage', logs: '/user/request-logs' }
   const path = map[userView.value]
@@ -146,6 +169,13 @@ async function selectUser(view: UserView) {
   }
 }
 
+async function createRechargeOrder(payload: { offer_id?: string; amount_cents?: number; note?: string }) {
+  try { await request('/user/recharge-orders', { method: 'POST', body: JSON.stringify(payload) }); notify('充值申请已提交'); await loadUserAll() } catch (e) { fail(e, '提交充值申请失败') }
+}
+async function reviewRechargeOrder(id: string, status: 'APPROVED' | 'REJECTED') {
+  const note = prompt(status === 'APPROVED' ? '到账备注（可选）' : '拒绝原因（可选）') ?? ''
+  try { await request(`/admin/recharge-orders/${id}`, { method: 'PATCH', body: JSON.stringify({ status, note }) }); notify(status === 'APPROVED' ? '充值已到账' : '充值已拒绝'); await loadAdminAll() } catch (e) { fail(e, '处理充值订单失败') }
+}
 async function applyPlan(planId: string) {
   try {
     await request('/user/plan-requests', { method: 'POST', body: JSON.stringify({ plan_id: planId }) })
@@ -167,17 +197,17 @@ function copyRequestId(value: string) { copyText(value, '请求 ID 已复制') }
 function openCreate(kind: string) { editing.value = null; modal.value = kind; form.value = defaults(kind) }
 function openEdit(kind: string, item: Row) { editing.value = item; modal.value = kind; const copy = { ...item, password: '', secret: '' }; if (copy.expires_at) copy.expires_at = new Date(copy.expires_at).toISOString().slice(0, 16); form.value = copy }
 function closeModal() { modal.value = ''; editing.value = null; form.value = {} }
-function defaults(kind: string): Row { const firstProvider = providers.value[0]?.id || ''; const firstModel = models.value[0]?.id || ''; return kind === 'user' ? { email: '', password: '', role: 'CUSTOMER', plan_id: null, credits_balance: 0 } : kind === 'plan' ? { name: '', monthly_credits: 0, rpm_limit: 60, tpm_limit: 0, max_concurrency: 2, monthly_request_limit: 0 } : kind === 'key' ? { user_id: isAdmin.value ? (users.value[0]?.id || '') : undefined, name: '默认密钥', expires_at: null } : kind === 'provider' ? { name: 'AICodeWith', adapter: 'openai_compatible', base_url: 'https://api.aicodewith.ai/v1', priority: 100, weight: 100 } : kind === 'credential' ? { provider_id: firstProvider, label: '主凭证', secret: '', priority: 100, weight: 100 } : kind === 'model' ? { model_name: '', provider_id: firstProvider, upstream_model: '', input_rate_micros: 1000, output_rate_micros: 2000, priority: 100, weight: 100 } : kind === 'route' ? { model_id: firstModel, provider_id: firstProvider, upstream_model: '', priority: 100, weight: 100 } : {} }
+function defaults(kind: string): Row { const firstProvider = providers.value[0]?.id || ''; const firstModel = models.value[0]?.id || ''; return kind === 'user' ? { email: '', password: '', role: 'CUSTOMER', plan_id: null, credits_balance: 0 } : kind === 'plan' ? { name: '', monthly_credits: 50, price_cents: 4990, currency: 'CNY', description: 'GPT-5.6 基础版', rpm_limit: 30, tpm_limit: 30000, max_concurrency: 2, monthly_request_limit: 1000 } : kind === 'recharge-offer' ? { name: '', amount_cents: 1000, base_los: 500, bonus_los: 0, description: '', sort_order: 100, enabled: true } : kind === 'key' ? { user_id: isAdmin.value ? (users.value[0]?.id || '') : undefined, name: '默认密钥', expires_at: null } : kind === 'provider' ? { name: 'AICodeWith', adapter: 'openai_compatible', base_url: 'https://api.aicodewith.ai/v1', priority: 100, weight: 100 } : kind === 'credential' ? { provider_id: firstProvider, label: '主凭证', secret: '', priority: 100, weight: 100 } : kind === 'model' ? { model_name: '', provider_id: firstProvider, upstream_model: '', input_rate_micros: 1620, output_rate_micros: 9700, rpm_limit: 30, tpm_limit: 100000, max_concurrency: 3, monthly_request_limit: 5000, priority: 100, weight: 100 } : kind === 'route' ? { model_id: firstModel, provider_id: firstProvider, upstream_model: '', priority: 100, weight: 100 } : {} }
 
-async function save() { busy.value = true; try { const kind = modal.value; const id = editing.value?.id; let path = ''; let method = id ? 'PATCH' : 'POST'; if (kind === 'user') path = id ? `/admin/users/${id}` : '/admin/users'; if (kind === 'plan') path = id ? `/admin/plans/${id}` : '/admin/plans'; if (kind === 'key') path = isAdmin.value ? (id ? `/admin/api-keys/${id}` : '/admin/api-keys') : (id ? `/user/api-keys/${id}` : '/user/api-keys'); if (kind === 'provider') path = id ? `/admin/providers/${id}` : '/admin/providers'; if (kind === 'credential') path = id ? `/admin/credentials/${id}` : '/admin/credentials'; if (kind === 'model') path = id ? `/admin/models/${id}` : '/admin/models'; if (kind === 'route') path = id ? `/admin/routes/${id}` : '/admin/routes'; const payload = { ...form.value }; if (payload.expires_at) payload.expires_at = new Date(payload.expires_at).toISOString(); else if (kind === 'key') payload.expires_at = null; if (id && kind === 'user') delete payload.password; if (id && kind === 'credential' && !payload.secret) delete payload.secret; if (id && kind === 'model') { delete payload.provider_id; delete payload.upstream_model; delete payload.priority; delete payload.weight } const result = await request(path, { method, body: JSON.stringify(payload) }); if (result.secret) { secretOnce.value = result.secret } closeModal(); notify(result.message || '保存成功'); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { fail(e, '保存失败') } finally { busy.value = false } }
+async function save() { busy.value = true; try { const kind = modal.value; const id = editing.value?.id; let path = ''; let method = id ? 'PATCH' : 'POST'; if (kind === 'user') path = id ? `/admin/users/${id}` : '/admin/users'; if (kind === 'plan') path = id ? `/admin/plans/${id}` : '/admin/plans'; if (kind === 'recharge-offer') path = id ? `/admin/recharge-offers/${id}` : '/admin/recharge-offers'; if (kind === 'key') path = isAdmin.value ? (id ? `/admin/api-keys/${id}` : '/admin/api-keys') : (id ? `/user/api-keys/${id}` : '/user/api-keys'); if (kind === 'provider') path = id ? `/admin/providers/${id}` : '/admin/providers'; if (kind === 'credential') path = id ? `/admin/credentials/${id}` : '/admin/credentials'; if (kind === 'model') path = id ? `/admin/models/${id}` : '/admin/models'; if (kind === 'route') path = id ? `/admin/routes/${id}` : '/admin/routes'; const payload = { ...form.value }; if (payload.expires_at) payload.expires_at = new Date(payload.expires_at).toISOString(); else if (kind === 'key') payload.expires_at = null; if (id && kind === 'user') delete payload.password; if (id && kind === 'credential' && !payload.secret) delete payload.secret; if (id && kind === 'model') { delete payload.provider_id; delete payload.upstream_model; delete payload.priority; delete payload.weight } const result = await request(path, { method, body: JSON.stringify(payload) }); if (result.secret) { secretOnce.value = result.secret } closeModal(); notify(result.message || '保存成功'); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { fail(e, '保存失败') } finally { busy.value = false } }
 
-async function setStatus(kind: string, item: Row, enabled: boolean) { rowBusy.value = item.id; try { let path = ''; let payload: any = { enabled }; if (kind === 'user') path = `/admin/users/${item.id}/status`; if (kind === 'plan') path = `/admin/plans/${item.id}/status`; if (kind === 'key') path = isAdmin.value ? `/admin/api-keys/${item.id}/status` : `/user/api-keys/${item.id}/status`; if (kind === 'provider') path = `/admin/providers/${item.id}/status`; if (kind === 'credential') { path = `/admin/credentials/${item.id}/status`; payload = { status: enabled ? 'ACTIVE' : 'DISABLED' } } if (kind === 'model') path = `/admin/models/${item.id}/status`; if (kind === 'route') path = `/admin/routes/${item.id}/status`; const result = await request(path, { method: 'PATCH', body: JSON.stringify(payload) }); item.enabled = enabled; if (kind === 'credential') item.status = payload.status; notify(result.message || '状态已更新'); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { fail(e, '状态更新失败') } finally { rowBusy.value = '' } }
+async function setStatus(kind: string, item: Row, enabled: boolean) { rowBusy.value = item.id; try { let path = ''; let payload: any = { enabled }; if (kind === 'user') path = `/admin/users/${item.id}/status`; if (kind === 'recharge-offer') { path = `/admin/recharge-offers/${item.id}`; payload = { name: item.name, amount_cents: item.amount_cents, base_los: item.base_los, bonus_los: item.bonus_los, description: item.description || '', sort_order: item.sort_order || 100, enabled } } if (kind === 'key') path = isAdmin.value ? `/admin/api-keys/${item.id}/status` : `/user/api-keys/${item.id}/status`; if (kind === 'provider') path = `/admin/providers/${item.id}/status`; if (kind === 'credential') { path = `/admin/credentials/${item.id}/status`; payload = { status: enabled ? 'ACTIVE' : 'DISABLED' } } if (kind === 'model') path = `/admin/models/${item.id}/status`; if (kind === 'route') path = `/admin/routes/${item.id}/status`; const result = await request(path, { method: 'PATCH', body: JSON.stringify(payload) }); item.enabled = enabled; if (kind === 'credential') item.status = payload.status; notify(result.message || '状态已更新'); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { fail(e, '状态更新失败') } finally { rowBusy.value = '' } }
 async function remove(kind: string, item: Row) {
   const displayName = item.name || item.model_name || item.label || item.key_prefix || item.id
   if (!confirm(`删除“${displayName}”？此操作不可撤销。`)) return
   rowBusy.value = item.id
   try {
-    const root = kind === 'user' ? 'users' : kind === 'plan' ? 'plans' : kind === 'key' ? 'api-keys' : kind === 'provider' ? 'providers' : kind === 'credential' ? 'credentials' : kind === 'model' ? 'models' : 'routes'
+    const root = kind === 'user' ? 'users' : kind === 'recharge-offer' ? 'recharge-offers' : kind === 'plan' ? 'plans' : kind === 'key' ? 'api-keys' : kind === 'provider' ? 'providers' : kind === 'credential' ? 'credentials' : kind === 'model' ? 'models' : 'routes'
     const prefix = isAdmin.value ? '/admin' : '/user'
     const result = await request(`${prefix}/${root}/${item.id}`, { method: 'DELETE' })
     if (kind === 'model' && result.deleted !== true) throw new Error('服务端未确认删除，请重试')
@@ -197,10 +227,10 @@ async function remove(kind: string, item: Row) {
 async function check(kind: string, item: Row) { rowBusy.value = item.id; notify('正在检测，请稍候…', 'info'); try { const path = kind === 'model' ? '/admin/models/check' : `/admin/${kind}s/${item.id}/check`; const init = kind === 'model' ? { method: 'POST', body: JSON.stringify({ model_id: item.id }) } : { method: 'POST' }; const result = await request(path, init); notify(`${result.message}${result.latency_ms !== undefined ? ` · ${result.latency_ms} ms` : ''}`, result.ok === false ? 'error' : 'success'); await loadAdminAll() } catch (e) { fail(e, '检测失败') } finally { rowBusy.value = '' } }
 async function resetPassword(item: Row) { const value = prompt(`为 ${item.email} 设置新密码（至少 8 位）`); if (!value) return; try { const result = await request(`/admin/users/${item.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: value }) }); notify(result.message) } catch (e) { fail(e, '密码重置失败') } }
 
-function fieldsFor(kind: string) { return kind === 'user' ? [['email', '邮箱', 'email'], ...(!editing.value ? [['password', '初始密码', 'password']] : []), ['role', '角色', 'select-role'], ['plan_id', '套餐', 'select-plan'], ['credits_balance', 'Credits 余额', 'number']] : kind === 'plan' ? [['name', '套餐名称', 'text'], ['monthly_credits', '套餐 Credits', 'number'], ['rpm_limit', 'RPM', 'number'], ['tpm_limit', 'TPM', 'number'], ['max_concurrency', '最大并发', 'number'], ['monthly_request_limit', '每月请求次数（0=不限）', 'number']] : kind === 'key' ? [...(isAdmin.value && !editing.value ? [['user_id', '所属用户', 'select-user']] : []), ['name', '密钥名称', 'text'], ['expires_at', '过期时间', 'datetime-local']] : kind === 'provider' ? [['name', '名称', 'text'], ['adapter', '适配器', 'text'], ['base_url', 'Base URL', 'url'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] : kind === 'credential' ? [...(!editing.value ? [['provider_id', 'Provider', 'select-provider']] : []), ['label', '凭证名称', 'text'], ['secret', '上游 API Key（留空表示不替换）', 'password'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] : kind === 'model' ? [...(!editing.value ? [['provider_id', 'Provider', 'select-provider']] : []), ['model_name', '客户端模型', 'text'], ...(!editing.value ? [['upstream_model', '上游模型', 'text']] : []), ['input_rate_micros', '输入倍率', 'number'], ['output_rate_micros', '输出倍率', 'number'], ...(!editing.value ? [['priority', '优先级', 'number'], ['weight', '权重', 'number']] : [])] : [['model_id', '客户端模型', 'select-model'], ['provider_id', 'Provider', 'select-provider'], ['upstream_model', '上游模型', 'text'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] }
-function labelOf(kind: string) { return { user: '用户', plan: '套餐', key: 'API 密钥', provider: 'Provider', credential: '凭证', model: '模型', route: '模型路由' }[kind] || kind }
-const currentKind = computed(() => adminView.value === 'users' ? 'user' : adminView.value === 'plans' ? 'plan' : adminView.value === 'keys' ? 'key' : adminView.value === 'providers' ? 'provider' : adminView.value === 'credentials' ? 'credential' : adminView.value === 'models' ? 'model' : adminView.value === 'routes' ? 'route' : '')
-const columns = computed(() => adminView.value === 'users' ? [['email', '邮箱'], ['role', '角色'], ['credits_balance', '余额'], ['enabled', '状态']] : adminView.value === 'plans' ? [['name', '名称'], ['monthly_credits', 'Credits'], ['rpm_limit', 'RPM'], ['tpm_limit', 'TPM'], ['max_concurrency', '并发'], ['monthly_request_limit', '月请求数'], ['enabled', '状态']] : adminView.value === 'keys' ? [['name', '名称'], ['key_prefix', '前缀'], ['enabled', '状态'], ['expires_at', '过期时间']] : adminView.value === 'providers' ? [['name', '名称'], ['base_url', 'Base URL'], ['priority', '优先级'], ['weight', '权重'], ['enabled', '状态']] : adminView.value === 'credentials' ? [['provider_name', 'Provider'], ['label', '名称'], ['secret_fingerprint', '指纹'], ['status', '状态'], ['last_used_at', '最近使用']] : adminView.value === 'models' ? [['model_name', '模型'], ['input_rate_micros', '输入倍率'], ['output_rate_micros', '输出倍率'], ['enabled', '状态']] : adminView.value === 'routes' ? [['model_name', '模型'], ['provider_name', 'Provider'], ['upstream_model', '上游模型'], ['priority', '优先级'], ['weight', '权重'], ['enabled', '状态']] : adminView.value === 'usage' ? [['created_at', '时间'], ['user_id', '用户'], ['model', '模型'], ['input_tokens', '输入 Token'], ['output_tokens', '输出 Token'], ['credits', 'Credits'], ['status', '状态']] : adminView.value === 'logs' ? [['created_at', '时间'], ['request_id', '请求 ID'], ['model', '模型'], ['status_code', '状态码'], ['latency_ms', '延迟(ms)'], ['error_code', '错误']] : [['created_at', '时间'], ['actor_email', '操作者'], ['action', '动作'], ['resource_type', '资源'], ['resource_id', '资源 ID']])
+function fieldsFor(kind: string) { return kind === 'user' ? [['email', '邮箱', 'email'], ...(!editing.value ? [['password', '初始密码', 'password']] : []), ['role', '角色', 'select-role'], ['plan_id', '套餐', 'select-plan'], ['credits_balance', 'Credits 余额', 'number']] : kind === 'plan' ? [['name', '套餐名称', 'text'], ['price_cents', '价格（分）', 'number'], ['currency', '货币', 'text'], ['description', '套餐说明', 'text'], ['monthly_credits', '套餐 Credits', 'number'], ['rpm_limit', 'RPM', 'number'], ['tpm_limit', 'TPM', 'number'], ['max_concurrency', '最大并发', 'number'], ['monthly_request_limit', '每月请求次数（0=不限）', 'number']] : kind === 'recharge-offer' ? [['name', '充值档位名称', 'text'], ['amount_cents', '金额（分）', 'number'], ['base_los', '基础 Los 分', 'number'], ['bonus_los', '赠送 Los 分', 'number'], ['description', '说明', 'text'], ['sort_order', '排序', 'number'], ['enabled', '启用', 'checkbox']] : kind === 'key' ? [...(isAdmin.value && !editing.value ? [['user_id', '所属用户', 'select-user']] : []), ['name', '密钥名称', 'text'], ['expires_at', '过期时间', 'datetime-local']] : kind === 'provider' ? [['name', '名称', 'text'], ['adapter', '适配器', 'text'], ['base_url', 'Base URL', 'url'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] : kind === 'credential' ? [...(!editing.value ? [['provider_id', 'Provider', 'select-provider']] : []), ['label', '凭证名称', 'text'], ['secret', '上游 API Key（留空表示不替换）', 'password'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] : kind === 'model' ? [...(!editing.value ? [['provider_id', 'Provider', 'select-provider']] : []), ['model_name', '客户端模型', 'text'], ...(!editing.value ? [['upstream_model', '上游模型', 'text']] : []), ['input_rate_micros', '输入 Los 分/百万 Token', 'number'], ['output_rate_micros', '输出 Los 分/百万 Token', 'number'], ['rpm_limit', 'RPM', 'number'], ['tpm_limit', 'TPM', 'number'], ['max_concurrency', '最大并发', 'number'], ['monthly_request_limit', '每月请求次数', 'number'], ...(!editing.value ? [['priority', '优先级', 'number'], ['weight', '权重', 'number']] : [])] : [['model_id', '客户端模型', 'select-model'], ['provider_id', 'Provider', 'select-provider'], ['upstream_model', '上游模型', 'text'], ['priority', '优先级', 'number'], ['weight', '权重', 'number']] }
+function labelOf(kind: string) { return { user: '用户', plan: '套餐', 'recharge-offer': '充值档位', key: 'API 密钥', provider: 'Provider', credential: '凭证', model: '模型', route: '模型路由' }[kind] || kind }
+const currentKind = computed(() => adminView.value === 'users' ? 'user' : adminView.value === 'recharge-offers' ? 'recharge-offer' : adminView.value === 'keys' ? 'key' : adminView.value === 'providers' ? 'provider' : adminView.value === 'credentials' ? 'credential' : adminView.value === 'models' ? 'model' : adminView.value === 'routes' ? 'route' : '')
+const columns = computed(() => adminView.value === 'users' ? [['email', '邮箱'], ['role', '角色'], ['credits_balance', 'Los 分余额'], ['enabled', '状态']] : adminView.value === 'recharge-offers' ? [['name', '名称'], ['amount_cents', '金额（分）'], ['base_los', '基础 Los 分'], ['bonus_los', '赠送 Los 分'], ['total_los', '总 Los 分'], ['enabled', '状态']] : adminView.value === 'keys' ? [['name', '名称'], ['key_prefix', '前缀'], ['enabled', '状态'], ['expires_at', '过期时间']] : adminView.value === 'providers' ? [['name', '名称'], ['base_url', 'Base URL'], ['priority', '优先级'], ['weight', '权重'], ['enabled', '状态']] : adminView.value === 'credentials' ? [['provider_name', 'Provider'], ['label', '名称'], ['secret_fingerprint', '指纹'], ['status', '状态'], ['last_used_at', '最近使用']] : adminView.value === 'models' ? [['model_name', '模型'], ['input_rate_micros', '输入 Los 分/百万'], ['output_rate_micros', '输出 Los 分/百万'], ['rpm_limit', 'RPM'], ['tpm_limit', 'TPM'], ['max_concurrency', '并发'], ['monthly_request_limit', '月请求'], ['enabled', '状态']] : adminView.value === 'routes' ? [['model_name', '模型'], ['provider_name', 'Provider'], ['upstream_model', '上游模型'], ['priority', '优先级'], ['weight', '权重'], ['enabled', '状态']] : adminView.value === 'usage' ? [['created_at', '时间'], ['user_id', '用户'], ['model', '模型'], ['input_tokens', '输入 Token'], ['output_tokens', '输出 Token'], ['credits', 'Credits'], ['status', '状态']] : adminView.value === 'logs' ? [['created_at', '时间'], ['request_id', '请求 ID'], ['model', '模型'], ['status_code', '状态码'], ['latency_ms', '延迟(ms)'], ['error_code', '错误']] : [['created_at', '时间'], ['actor_email', '操作者'], ['action', '动作'], ['resource_type', '资源'], ['resource_id', '资源 ID']])
 
 onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { fail(e, '恢复会话失败') } })
 </script>
@@ -219,10 +249,10 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
     <aside>
       <div class="brand">LOS / TOKEN<small>{{ isAdmin ? '管理员控制台' : '用户控制台' }}</small></div>
       <nav v-if="isAdmin"><button
-          v-for="item in ([['overview', '平台总览'], ['users', '用户管理'], ['plans', '套餐管理'], ['plan-requests', '套餐申请'], ['keys', '平台 API 密钥'], ['providers', 'Provider 管理'], ['credentials', 'Provider 凭证'], ['models', '模型管理'], ['routes', '模型路由'], ['usage', '平台使用量'], ['logs', '请求日志'], ['audit', '审计日志']] as const)"
+          v-for="item in ([['overview', '平台总览'], ['users', '用户管理'], ['recharge-orders', '充值订单'], ['recharge-offers', '充值档位'], ['keys', '平台 API 密钥'], ['providers', 'Provider 管理'], ['credentials', 'Provider 凭证'], ['models', '模型管理'], ['routes', '模型路由'], ['usage', '平台使用量'], ['logs', '请求日志'], ['audit', '审计日志']] as const)"
           :key="item[0]" :class="{ active: adminView === item[0] }" @click="selectAdmin(item[0])">{{ item[1] }}</button></nav>
       <nav v-else><button
-          v-for="item in ([['overview', '账户总览'], ['keys', '我的 API 密钥'], ['plans', '套餐与余额'], ['usage', '使用量日志'], ['logs', '请求日志'], ['docs', 'API 文档'], ['profile', '账户资料']] as const)"
+          v-for="item in ([['overview', '账户总览'], ['keys', '我的 API 密钥'], ['recharge', 'Los 分充值'], ['usage', '使用量日志'], ['logs', '请求日志'], ['docs', 'API 文档'], ['profile', '账户资料']] as const)"
           :key="item[0]" :class="{ active: userView === item[0] }" @click="selectUser(item[0])">{{ item[1] }}</button></nav>
       <button class="logout" @click="logout">退出登录</button>
     </aside>
@@ -241,7 +271,7 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
           <article><small>累计 Credits</small><strong>{{ dashboard.credits || 0 }}</strong></article>
           <article><small>活跃用户</small><strong>{{ dashboard.users || 0 }}</strong></article>
         </section>
-        <AdminPlanRequests v-else-if="adminView === 'plan-requests'" :rows="planRequests" @review="reviewPlanRequest" />
+        <AdminRechargeOrders v-else-if="adminView === 'recharge-orders'" :rows="rechargeOrders" @review="reviewRechargeOrder" />
         <section v-else class="panel">
           <div class="panel-head">
             <h2>{{ adminTitles[adminView] }}</h2><button v-if="currentKind" @click="openCreate(currentKind)">新增{{ labelOf(currentKind) }}</button>
@@ -291,7 +321,7 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
           :balance="dashboard.balance"
           @copy="copyText"
         />
-        <UserPlans v-else-if="userView === 'plans'" :plans="userPlans" :requests="planRequests" :billing="billing" @apply="applyPlan" @refresh="loadUserAll" />
+        <UserRecharge v-else-if="userView === 'recharge'" :offers="rechargeOffers" :orders="rechargeOrders" :balance="Number(billing.balance ?? dashboard.balance ?? 0)" @purchase="createRechargeOrder" />
         <section v-else-if="userView === 'profile'" class="panel">
           <h2>账户资料</h2>
           <dl>
@@ -431,7 +461,7 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
       <h2>API 密钥创建成功</h2>
       <p>请立即复制并安全保存。关闭后无法再次查看完整密钥。</p><code class="secret">{{ secretOnce }}</code>
       <div class="modal-actions"><button type="button"
-          @click="navigator.clipboard.writeText(secretOnce); notify('密钥已复制')">复制密钥</button><button type="button"
+          @click="copyText(secretOnce, '密钥已复制')">复制密钥</button><button type="button"
           class="secondary" @click="secretOnce = ''">我已安全保存</button></div>
     </div>
   </div>

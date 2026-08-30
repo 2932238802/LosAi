@@ -203,6 +203,10 @@ pub async fn delete_user(
     ))
 }
 
+fn default_currency() -> String {
+    "CNY".to_owned()
+}
+
 #[derive(Deserialize)]
 pub struct PlanUpdateInput {
     pub name: String,
@@ -212,6 +216,12 @@ pub struct PlanUpdateInput {
     pub max_concurrency: i32,
     #[serde(default)]
     pub monthly_request_limit: i64,
+    #[serde(default)]
+    pub price_cents: i64,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 pub async fn update_plan(
@@ -227,11 +237,13 @@ pub async fn update_plan(
         || input.tpm_limit < 0
         || input.max_concurrency <= 0
         || input.monthly_request_limit < 0
+        || input.price_cents < 0
+        || input.currency.trim().is_empty()
     {
         return Err(GatewayError::Validation("套餐参数无效".to_owned()));
     }
-    let affected = sqlx::query("UPDATE plans SET name=$2,monthly_credits=$3,rpm_limit=$4,tpm_limit=$5,max_concurrency=$6,monthly_request_limit=$7,updated_at=now() WHERE id=$1")
-        .bind(id).bind(input.name.trim()).bind(input.monthly_credits).bind(input.rpm_limit).bind(input.tpm_limit).bind(input.max_concurrency).bind(input.monthly_request_limit)
+    let affected = sqlx::query("UPDATE plans SET name=$2,monthly_credits=$3,price_cents=$4,currency=$5,description=$6,rpm_limit=$7,tpm_limit=$8,max_concurrency=$9,monthly_request_limit=$10,updated_at=now() WHERE id=$1")
+        .bind(id).bind(input.name.trim()).bind(input.monthly_credits).bind(input.price_cents).bind(input.currency.trim().to_uppercase()).bind(input.description.trim()).bind(input.rpm_limit).bind(input.tpm_limit).bind(input.max_concurrency).bind(input.monthly_request_limit)
         .execute(&state.db).await.map_err(|_|GatewayError::Validation("套餐名称已存在或参数无效".to_owned()))?.rows_affected();
     if affected == 0 {
         return Err(GatewayError::Validation("套餐不存在".to_owned()));
@@ -743,6 +755,10 @@ pub struct ModelUpdateInput {
     pub model_name: String,
     pub input_rate_micros: i64,
     pub output_rate_micros: i64,
+    pub rpm_limit: i32,
+    pub tpm_limit: i64,
+    pub max_concurrency: i32,
+    pub monthly_request_limit: i64,
 }
 pub async fn update_model(
     State(state): State<AppState>,
@@ -754,10 +770,19 @@ pub async fn update_model(
     if input.model_name.trim().is_empty()
         || input.input_rate_micros < 0
         || input.output_rate_micros < 0
+        || input.rpm_limit <= 0
+        || input.tpm_limit < 0
+        || input.max_concurrency <= 0
+        || input.monthly_request_limit < 0
     {
         return Err(GatewayError::Validation("模型参数无效".to_owned()));
     }
-    let affected=sqlx::query("UPDATE models SET model_name=$2,input_rate_micros=$3,output_rate_micros=$4,updated_at=now() WHERE id=$1").bind(id).bind(input.model_name.trim()).bind(input.input_rate_micros).bind(input.output_rate_micros).execute(&state.db).await.map_err(|_|GatewayError::Validation("模型名称已存在或参数无效".to_owned()))?.rows_affected();
+    let affected=sqlx::query("UPDATE models SET model_name=$2,input_rate_micros=$3,output_rate_micros=$4,rpm_limit=$5,tpm_limit=$6,max_concurrency=$7,monthly_request_limit=$8,updated_at=now() WHERE id=$1").bind(id).bind(input.model_name.trim()).bind(input.input_rate_micros).bind(input.output_rate_micros)
+        .bind(input.rpm_limit)
+        .bind(input.tpm_limit)
+        .bind(input.max_concurrency)
+        .bind(input.monthly_request_limit)
+        .execute(&state.db).await.map_err(|_|GatewayError::Validation("模型名称已存在或参数无效".to_owned()))?.rows_affected();
     if affected == 0 {
         return Err(GatewayError::Validation("模型不存在".to_owned()));
     }

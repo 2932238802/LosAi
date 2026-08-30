@@ -78,8 +78,29 @@ pub struct ModelInput {
     pub upstream_model: Option<String>,
     pub input_rate_micros: i64,
     pub output_rate_micros: i64,
+    #[serde(default = "default_rpm")]
+    pub rpm_limit: i32,
+    #[serde(default = "default_tpm")]
+    pub tpm_limit: i64,
+    #[serde(default = "default_concurrency")]
+    pub max_concurrency: i32,
+    #[serde(default = "default_monthly_requests")]
+    pub monthly_request_limit: i64,
     pub priority: Option<i32>,
     pub weight: Option<i32>,
+}
+
+fn default_rpm() -> i32 {
+    30
+}
+fn default_tpm() -> i64 {
+    100_000
+}
+fn default_concurrency() -> i32 {
+    3
+}
+fn default_monthly_requests() -> i64 {
+    5_000
 }
 
 #[derive(Deserialize)]
@@ -242,7 +263,7 @@ pub async fn models(
 ) -> Result<Json<serde_json::Value>> {
     check_admin(&state, &headers)?;
     let rows = sqlx::query(
-        "SELECT id,model_name,input_rate_micros,output_rate_micros,enabled FROM models ORDER BY model_name",
+        "SELECT id,model_name,input_rate_micros,output_rate_micros,rpm_limit,tpm_limit,max_concurrency,monthly_request_limit,enabled FROM models ORDER BY model_name",
     )
     .fetch_all(&state.db)
     .await
@@ -253,6 +274,10 @@ pub async fn models(
             "model_name": row.get::<String,_>("model_name"),
             "input_rate_micros": row.get::<i64,_>("input_rate_micros"),
             "output_rate_micros": row.get::<i64,_>("output_rate_micros"),
+            "rpm_limit": row.get::<i32,_>("rpm_limit"),
+            "tpm_limit": row.get::<i64,_>("tpm_limit"),
+            "max_concurrency": row.get::<i32,_>("max_concurrency"),
+            "monthly_request_limit": row.get::<i64,_>("monthly_request_limit"),
             "enabled": row.get::<bool,_>("enabled"),
         })).collect::<Vec<_>>(),
     })))
@@ -267,6 +292,10 @@ pub async fn create_model(
     if input.model_name.trim().is_empty()
         || input.input_rate_micros < 0
         || input.output_rate_micros < 0
+        || input.rpm_limit <= 0
+        || input.tpm_limit < 0
+        || input.max_concurrency <= 0
+        || input.monthly_request_limit < 0
     {
         return Err(GatewayError::Validation("模型参数无效".to_owned()));
     }
@@ -302,11 +331,15 @@ pub async fn create_model(
     }
 
     let model_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO models(model_name,input_rate_micros,output_rate_micros) VALUES($1,$2,$3) RETURNING id",
+        "INSERT INTO models(model_name,input_rate_micros,output_rate_micros,rpm_limit,tpm_limit,max_concurrency,monthly_request_limit) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",
     )
     .bind(input.model_name.trim())
     .bind(input.input_rate_micros)
     .bind(input.output_rate_micros)
+    .bind(input.rpm_limit)
+    .bind(input.tpm_limit)
+    .bind(input.max_concurrency)
+    .bind(input.monthly_request_limit)
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| GatewayError::Validation("模型已存在或参数无效".to_owned()))?;

@@ -25,6 +25,8 @@ function statusText(value: string) { return ({ PENDING: '等待审核', APPROVED
       <div class="plan-cards">
         <article v-for="plan in props.plans" :key="plan.id" class="plan-card">
           <h3>{{ plan.name }}</h3>
+          <p class="plan-price">{{ plan.currency === 'CNY' ? '¥' : plan.currency }}{{ (Number(plan.price_cents || 0) / 100).toFixed(2) }}</p>
+          <p v-if="plan.description" class="plan-description">{{ plan.description }}</p>
           <p class="plan-credit">{{ plan.monthly_credits }} Credits</p>
           <dl><div><dt>RPM</dt><dd>{{ limit(plan.rpm_limit) }}</dd></div><div><dt>TPM</dt><dd>{{ limit(plan.tpm_limit) }}</dd></div><div><dt>最大并发</dt><dd>{{ limit(plan.max_concurrency) }}</dd></div><div><dt>月请求数</dt><dd>{{ limit(plan.monthly_request_limit) }}</dd></div></dl>
           <button :disabled="applying === plan.id" @click="apply(plan.id)">{{ applying === plan.id ? '提交中…' : '申请此套餐' }}</button>

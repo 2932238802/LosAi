@@ -16,13 +16,14 @@ pub fn calculate_credits(
             "Token 和费率不能为负数".to_owned(),
         ));
     }
-    let input = input_tokens
+    let micros = input_tokens
         .checked_mul(input_rate)
+        .and_then(|value| value.checked_add(output_tokens.checked_mul(output_rate)?))
         .ok_or(GatewayError::Internal)?;
-    let output = output_tokens
-        .checked_mul(output_rate)
-        .ok_or(GatewayError::Internal)?;
-    input.checked_add(output).ok_or(GatewayError::Internal)
+    if micros == 0 {
+        return Ok(0);
+    }
+    Ok((micros + 999_999) / 1_000_000)
 }
 
 pub struct Settlement {
@@ -87,7 +88,8 @@ mod tests {
     use super::calculate_credits;
     #[test]
     fn uses_integer_pricing() {
-        assert_eq!(calculate_credits(10, 5, 2, 3).unwrap(), 35);
+        assert_eq!(calculate_credits(10, 5, 2, 3).unwrap(), 1);
+        assert_eq!(calculate_credits(100, 500, 1000, 2000).unwrap(), 2);
     }
     #[test]
     fn rejects_negative_values() {
