@@ -46,6 +46,12 @@ pub fn router(s: AppState) -> Router {
         .route("/user/dashboard", get(api::user_dashboard))
         .route("/user/profile", get(api::user_profile))
         .route("/user/subscription", get(api::user_subscription))
+        .route("/user/plans", get(api::user_plans))
+        .route(
+            "/user/plan-requests",
+            get(api::user_plan_requests).post(api::user_request_plan),
+        )
+        .route("/user/billing", get(api::user_credits))
         .route("/user/usage", get(api::user_usage))
         .route("/user/request-logs", get(analytics::user_logs))
         .route("/user/credits/ledger", get(api::user_credits_ledger))
@@ -80,6 +86,11 @@ pub fn router(s: AppState) -> Router {
             patch(crud::update_plan).delete(crud::delete_plan),
         )
         .route("/admin/plans/{id}/status", patch(crud::update_plan_status))
+        .route("/admin/plan-requests", get(api::admin_plan_requests))
+        .route(
+            "/admin/plan-requests/{id}",
+            patch(api::admin_review_plan_request),
+        )
         .route("/admin/api-keys", get(api::list_keys).post(api::create_key))
         .route(
             "/admin/api-keys/{id}",

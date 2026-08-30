@@ -80,6 +80,17 @@ pub struct CreditChange {
     pub description: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct PlanRequestInput {
+    pub plan_id: Uuid,
+}
+
+#[derive(Deserialize)]
+pub struct PlanRequestReviewInput {
+    pub status: String,
+    pub note: Option<String>,
+}
+
 fn bearer(headers: &HeaderMap) -> Result<&str> {
     headers
         .get(AUTHORIZATION)
@@ -566,6 +577,123 @@ pub async fn admin_credits_ledger(
         "request_id": r.get::<Option<Uuid>, _>("request_id"), "created_by": r.get::<Option<Uuid>, _>("created_by"),
         "created_at": r.get::<DateTime<Utc>, _>("created_at")
     })).collect::<Vec<_>>() }),
+    ))
+}
+
+pub async fn user_plans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    user(&state, &headers)?;
+    let rows = sqlx::query("SELECT id,name,monthly_credits,rpm_limit,tpm_limit,max_concurrency,monthly_request_limit FROM plans WHERE enabled=true ORDER BY monthly_credits ASC, name ASC")
+        .fetch_all(&state.db).await.map_err(|_| GatewayError::Internal)?;
+    Ok(Json(
+        serde_json::json!({"data": rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<Uuid, _>("id"), "name": r.get::<String, _>("name"),
+        "monthly_credits": r.get::<i64, _>("monthly_credits"), "rpm_limit": r.get::<i32, _>("rpm_limit"),
+        "tpm_limit": r.get::<i32, _>("tpm_limit"), "max_concurrency": r.get::<i32, _>("max_concurrency"),
+        "monthly_request_limit": r.get::<i64, _>("monthly_request_limit")
+    })).collect::<Vec<_>>() }),
+    ))
+}
+
+pub async fn user_plan_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    let claims = user(&state, &headers)?;
+    let rows = sqlx::query("SELECT r.id,r.plan_id,p.name plan_name,r.status,r.note,r.created_at,r.reviewed_at FROM plan_requests r JOIN plans p ON p.id=r.plan_id WHERE r.user_id=$1 ORDER BY r.created_at DESC")
+        .bind(claims.sub).fetch_all(&state.db).await.map_err(|_| GatewayError::Internal)?;
+    Ok(Json(
+        serde_json::json!({"data": rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<Uuid, _>("id"), "plan_id": r.get::<Uuid, _>("plan_id"),
+        "plan_name": r.get::<String, _>("plan_name"), "status": r.get::<String, _>("status"),
+        "note": r.get::<String, _>("note"), "created_at": r.get::<DateTime<Utc>, _>("created_at"),
+        "reviewed_at": r.get::<Option<DateTime<Utc>>, _>("reviewed_at")
+    })).collect::<Vec<_>>() }),
+    ))
+}
+
+pub async fn user_request_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PlanRequestInput>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = user(&state, &headers)?;
+    let id = sqlx::query_scalar::<_, Uuid>("INSERT INTO plan_requests(user_id,plan_id) SELECT $1,p.id FROM plans p WHERE p.id=$2 AND p.enabled=true RETURNING id")
+        .bind(claims.sub).bind(input.plan_id).fetch_optional(&state.db).await
+        .map_err(|_| GatewayError::Validation("你已经有一个待审核的套餐申请".to_owned()))?
+        .ok_or_else(|| GatewayError::Validation("套餐不存在或已下架".to_owned()))?;
+    Ok(Json(
+        serde_json::json!({"id": id, "status": "PENDING", "message": "套餐申请已提交，请等待管理员审核"}),
+    ))
+}
+
+pub async fn admin_plan_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    admin(&state, &headers)?;
+    let rows = sqlx::query("SELECT r.id,r.user_id,u.email,r.plan_id,p.name plan_name,r.status,r.note,r.created_at,r.reviewed_at FROM plan_requests r JOIN users u ON u.id=r.user_id JOIN plans p ON p.id=r.plan_id ORDER BY CASE WHEN r.status='PENDING' THEN 0 ELSE 1 END,r.created_at DESC")
+        .fetch_all(&state.db).await.map_err(|_| GatewayError::Internal)?;
+    Ok(Json(
+        serde_json::json!({"data": rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<Uuid, _>("id"), "user_id": r.get::<Uuid, _>("user_id"), "email": r.get::<String, _>("email"),
+        "plan_id": r.get::<Uuid, _>("plan_id"), "plan_name": r.get::<String, _>("plan_name"),
+        "status": r.get::<String, _>("status"), "note": r.get::<String, _>("note"),
+        "created_at": r.get::<DateTime<Utc>, _>("created_at"), "reviewed_at": r.get::<Option<DateTime<Utc>>, _>("reviewed_at")
+    })).collect::<Vec<_>>() }),
+    ))
+}
+
+pub async fn admin_review_plan_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<PlanRequestReviewInput>,
+) -> Result<Json<serde_json::Value>> {
+    let claims = admin(&state, &headers)?;
+    if !matches!(input.status.as_str(), "APPROVED" | "REJECTED") {
+        return Err(GatewayError::Validation("审核状态无效".to_owned()));
+    }
+    let mut tx = state.db.begin().await.map_err(|_| GatewayError::Internal)?;
+    let request =
+        sqlx::query("SELECT user_id,plan_id,status FROM plan_requests WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| GatewayError::Internal)?
+            .ok_or_else(|| GatewayError::Validation("套餐申请不存在".to_owned()))?;
+    if request.get::<String, _>("status") != "PENDING" {
+        return Err(GatewayError::Validation("该申请已经审核过了".to_owned()));
+    }
+    let note = input.note.unwrap_or_default();
+    sqlx::query("UPDATE plan_requests SET status=$2,note=$3,reviewed_by=$4,reviewed_at=now(),updated_at=now() WHERE id=$1")
+        .bind(id).bind(&input.status).bind(&note).bind(claims.sub).execute(&mut *tx).await.map_err(|_| GatewayError::Internal)?;
+    if input.status == "APPROVED" {
+        sqlx::query("UPDATE users SET plan_id=$1,updated_at=now() WHERE id=$2")
+            .bind(request.get::<Uuid, _>("plan_id"))
+            .bind(request.get::<Uuid, _>("user_id"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| GatewayError::Internal)?;
+    }
+    tx.commit().await.map_err(|_| GatewayError::Internal)?;
+    audit(&state, claims.sub, &input.status, "PLAN_REQUEST", id).await;
+    Ok(Json(
+        serde_json::json!({"id": id, "status": input.status, "message": "套餐申请审核完成"}),
+    ))
+}
+
+pub async fn user_credits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    let claims = user(&state, &headers)?;
+    let row = sqlx::query("SELECT u.credits_balance,COALESCE(p.name,'未订阅') plan_name,COALESCE(p.rpm_limit,0) rpm_limit,COALESCE(p.tpm_limit,0) tpm_limit,COALESCE(p.max_concurrency,0) max_concurrency,COALESCE(p.monthly_request_limit,0) monthly_request_limit,(SELECT COUNT(*) FROM request_logs l WHERE l.user_id=u.id AND l.created_at>=date_trunc('month',now()))::bigint monthly_requests FROM users u LEFT JOIN plans p ON p.id=u.plan_id WHERE u.id=$1")
+        .bind(claims.sub).fetch_one(&state.db).await.map_err(|_| GatewayError::Internal)?;
+    Ok(Json(
+        serde_json::json!({"balance": row.get::<i64,_>("credits_balance"), "plan_name": row.get::<String,_>("plan_name"), "rpm_limit": row.get::<i32,_>("rpm_limit"), "tpm_limit": row.get::<i32,_>("tpm_limit"), "max_concurrency": row.get::<i32,_>("max_concurrency"), "monthly_request_limit": row.get::<i64,_>("monthly_request_limit"), "monthly_requests": row.get::<i64,_>("monthly_requests")}),
     ))
 }
 

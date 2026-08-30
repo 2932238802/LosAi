@@ -210,6 +210,8 @@ pub struct PlanUpdateInput {
     pub rpm_limit: i32,
     pub tpm_limit: i32,
     pub max_concurrency: i32,
+    #[serde(default)]
+    pub monthly_request_limit: i64,
 }
 
 pub async fn update_plan(
@@ -224,11 +226,12 @@ pub async fn update_plan(
         || input.rpm_limit <= 0
         || input.tpm_limit < 0
         || input.max_concurrency <= 0
+        || input.monthly_request_limit < 0
     {
         return Err(GatewayError::Validation("套餐参数无效".to_owned()));
     }
-    let affected = sqlx::query("UPDATE plans SET name=$2,monthly_credits=$3,rpm_limit=$4,tpm_limit=$5,max_concurrency=$6,updated_at=now() WHERE id=$1")
-        .bind(id).bind(input.name.trim()).bind(input.monthly_credits).bind(input.rpm_limit).bind(input.tpm_limit).bind(input.max_concurrency)
+    let affected = sqlx::query("UPDATE plans SET name=$2,monthly_credits=$3,rpm_limit=$4,tpm_limit=$5,max_concurrency=$6,monthly_request_limit=$7,updated_at=now() WHERE id=$1")
+        .bind(id).bind(input.name.trim()).bind(input.monthly_credits).bind(input.rpm_limit).bind(input.tpm_limit).bind(input.max_concurrency).bind(input.monthly_request_limit)
         .execute(&state.db).await.map_err(|_|GatewayError::Validation("套餐名称已存在或参数无效".to_owned()))?.rows_affected();
     if affected == 0 {
         return Err(GatewayError::Validation("套餐不存在".to_owned()));

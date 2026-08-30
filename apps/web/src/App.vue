@@ -2,12 +2,14 @@
 import { computed, onMounted, ref } from 'vue'
 import LoginForm from './components/LoginForm.vue'
 import UserApiDocs from './components/UserApiDocs.vue'
+import UserPlans from './components/UserPlans.vue'
+import AdminPlanRequests from './components/AdminPlanRequests.vue'
 
 type Row = Record<string, any>
 type Role = 'ADMIN' | 'CUSTOMER' | ''
 type Toast = { type: 'success' | 'error' | 'info'; message: string }
-type AdminView = 'overview' | 'users' | 'plans' | 'keys' | 'providers' | 'credentials' | 'models' | 'routes' | 'usage' | 'logs' | 'audit'
-type UserView = 'overview' | 'keys' | 'usage' | 'logs' | 'docs' | 'profile'
+type AdminView = 'overview' | 'users' | 'plans' | 'plan-requests' | 'keys' | 'providers' | 'credentials' | 'models' | 'routes' | 'usage' | 'logs' | 'audit'
+type UserView = 'overview' | 'keys' | 'plans' | 'usage' | 'logs' | 'docs' | 'profile'
 
 const token = ref(localStorage.getItem('lostoken_token') || '')
 const role = ref<Role>((localStorage.getItem('lostoken_role') as Role) || '')
@@ -42,6 +44,9 @@ const models = ref<Row[]>([])
 const routes = ref<Row[]>([])
 const profile = ref<Row>({})
 const subscription = ref<Row>({})
+const billing = ref<Row>({})
+const userPlans = ref<Row[]>([])
+const planRequests = ref<Row[]>([])
 const form = ref<Row>({})
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -55,8 +60,8 @@ const docsStream = ref(false)
 const docsModel = ref('general-chat')
 const docsModels = computed(() => list(models.value.length ? models.value : dashboard.value.models))
 const selectedDocsModel = computed(() => docsModel.value || docsModels.value[0]?.id || 'general-chat')
-const adminTitles: Record<AdminView, string> = { overview: '平台总览', users: '用户管理', plans: '套餐管理', keys: '平台 API 密钥', providers: 'Provider 管理', credentials: 'Provider 凭证', models: '模型管理', routes: '模型路由', usage: '平台使用量', logs: '请求日志', audit: '审计日志' }
-const userTitles: Record<UserView, string> = { overview: '账户总览', keys: '我的 API 密钥', usage: '使用量日志', logs: '请求日志', docs: 'API 文档', profile: '账户资料' }
+const adminTitles: Record<AdminView, string> = { overview: '平台总览', users: '用户管理', plans: '套餐管理', 'plan-requests': '套餐申请', keys: '平台 API 密钥', providers: 'Provider 管理', credentials: 'Provider 凭证', models: '模型管理', routes: '模型路由', usage: '平台使用量', logs: '请求日志', audit: '审计日志' }
+const userTitles: Record<UserView, string> = { overview: '账户总览', keys: '我的 API 密钥', plans: '套餐与余额', usage: '使用量日志', logs: '请求日志', docs: 'API 文档', profile: '账户资料' }
 
 async function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
@@ -99,14 +104,14 @@ function logout() {
 async function authenticate() { busy.value = true; error.value = ''; try { const path = authMode.value === 'login' ? '/auth/login' : '/auth/register'; const payload = authMode.value === 'login' ? { email: email.value, password: password.value } : { email: email.value, password: password.value, confirm_password: confirmPassword.value }; const result = await request(path, { method: 'POST', body: JSON.stringify(payload) }); token.value = result.access_token; role.value = result.role || 'CUSTOMER'; localStorage.setItem('lostoken_token', token.value); localStorage.setItem('lostoken_role', role.value); if (isAdmin.value) await loadAdminAll(); else await loadUserAll() } catch (e) { error.value = e instanceof Error ? e.message : '认证失败' } finally { busy.value = false } }
 
 async function loadAdminAll() {
-  const results = await Promise.allSettled(['/admin/dashboard', '/admin/users', '/admin/plans', '/admin/api-keys', '/admin/providers', '/admin/credentials', '/admin/models', '/admin/routes'].map(path => request(path)))
+  const results = await Promise.allSettled(['/admin/dashboard', '/admin/users', '/admin/plans', '/admin/api-keys', '/admin/providers', '/admin/credentials', '/admin/models', '/admin/routes', '/admin/plan-requests'].map(path => request(path)))
   const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}
-  dashboard.value = value(0); users.value = list(value(1)); plans.value = list(value(2)); keys.value = list(value(3)); providers.value = list(value(4)); credentials.value = list(value(5)); models.value = list(value(6)); routes.value = list(value(7)); await loadAdminView()
+  dashboard.value = value(0); users.value = list(value(1)); plans.value = list(value(2)); keys.value = list(value(3)); providers.value = list(value(4)); credentials.value = list(value(5)); models.value = list(value(6)); routes.value = list(value(7)); planRequests.value = list(value(8)); await loadAdminView()
 }
-async function loadAdminView() { if (!isAdmin.value) return; const map: Partial<Record<AdminView, string>> = { users: '/admin/users', plans: '/admin/plans', keys: '/admin/api-keys', providers: '/admin/providers', credentials: '/admin/credentials', models: '/admin/models', routes: '/admin/routes', usage: '/admin/usage', logs: '/admin/request-logs', audit: '/admin/audit-logs' }; const path = map[adminView.value]; if (path) rows.value = list(await request(path)); else rows.value = [] }
+async function loadAdminView() { if (!isAdmin.value) return; const map: Partial<Record<AdminView, string>> = { users: '/admin/users', plans: '/admin/plans', 'plan-requests': '/admin/plan-requests', keys: '/admin/api-keys', providers: '/admin/providers', credentials: '/admin/credentials', models: '/admin/models', routes: '/admin/routes', usage: '/admin/usage', logs: '/admin/request-logs', audit: '/admin/audit-logs' }; const path = map[adminView.value]; if (path) rows.value = list(await request(path)); else rows.value = [] }
 async function selectAdmin(view: AdminView) { adminView.value = view; error.value = ''; try { await loadAdminView() } catch (e) { fail(e, '加载数据失败') } }
 
-async function loadUserAll() { const results = await Promise.allSettled(['/user/dashboard', '/user/profile', '/user/subscription', '/user/api-keys', '/v1/models'].map(path => request(path))); const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}; dashboard.value = value(0); profile.value = value(1); subscription.value = value(2); keys.value = list(value(3)); models.value = list(value(4)); await loadUserView() }
+async function loadUserAll() { const results = await Promise.allSettled(['/user/dashboard', '/user/profile', '/user/subscription', '/user/api-keys', '/v1/models', '/user/plans', '/user/plan-requests', '/user/billing'].map(path => request(path))); const value = (i: number) => results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<any>).value : {}; dashboard.value = value(0); profile.value = value(1); subscription.value = value(2); keys.value = list(value(3)); models.value = list(value(4)); userPlans.value = list(value(5)); planRequests.value = list(value(6)); billing.value = value(7); await loadUserView() }
 async function loadUserView() {
   const map: Partial<Record<UserView, string>> = { keys: '/user/api-keys', usage: '/user/usage', logs: '/user/request-logs' }
   const path = map[userView.value]
@@ -126,7 +131,8 @@ async function loadUserView() {
     throw e
   } finally { rowsLoading.value = false }
 }
-async function selectUser(view: UserView) { userView.value = view; page.value = 1; error.value = ''; try { await loadUserView() } catch (e) { fail(e, '加载数据失败') } }
+async function applyPlan(planId: string) { try { await request('/user/plan-requests', { method: 'POST', body: JSON.stringify({ plan_id: planId }) }); notify('套餐申请已提交'); await loadUserAll() } catch (e) { fail(e, '申请套餐失败') } }
+async function reviewPlanRequest(id: string, status: 'APPROVED' | 'REJECTED') { const note = prompt(status === 'APPROVED' ? '审核备注（可选）' : '拒绝原因（可选）') ?? ''; try { await request(`/admin/plan-requests/${id}`, { method: 'PATCH', body: JSON.stringify({ status, note }) }); notify('审核完成'); await loadAdminAll() } catch (e) { fail(e, '审核失败') } }
 async function changeUserPage(next: number) {
   if (next < 1 || (totalPages.value > 0 && next > totalPages.value) || rowsLoading.value) return
   page.value = next
@@ -190,10 +196,10 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
     <aside>
       <div class="brand">LOS / TOKEN<small>{{ isAdmin ? '管理员控制台' : '用户控制台' }}</small></div>
       <nav v-if="isAdmin"><button
-          v-for="item in ([['overview', '平台总览'], ['users', '用户管理'], ['plans', '套餐管理'], ['keys', '平台 API 密钥'], ['providers', 'Provider 管理'], ['credentials', 'Provider 凭证'], ['models', '模型管理'], ['routes', '模型路由'], ['usage', '平台使用量'], ['logs', '请求日志'], ['audit', '审计日志']] as const)"
+          v-for="item in ([['overview', '平台总览'], ['users', '用户管理'], ['plans', '套餐管理'], ['plan-requests', '套餐申请'], ['keys', '平台 API 密钥'], ['providers', 'Provider 管理'], ['credentials', 'Provider 凭证'], ['models', '模型管理'], ['routes', '模型路由'], ['usage', '平台使用量'], ['logs', '请求日志'], ['audit', '审计日志']] as const)"
           :key="item[0]" :class="{ active: adminView === item[0] }" @click="selectAdmin(item[0])">{{ item[1] }}</button></nav>
       <nav v-else><button
-          v-for="item in ([['overview', '账户总览'], ['keys', '我的 API 密钥'], ['usage', '使用量日志'], ['logs', '请求日志'], ['docs', 'API 文档'], ['profile', '账户资料']] as const)"
+          v-for="item in ([['overview', '账户总览'], ['keys', '我的 API 密钥'], ['plans', '套餐与余额'], ['usage', '使用量日志'], ['logs', '请求日志'], ['docs', 'API 文档'], ['profile', '账户资料']] as const)"
           :key="item[0]" :class="{ active: userView === item[0] }" @click="selectUser(item[0])">{{ item[1] }}</button></nav>
       <button class="logout" @click="logout">退出登录</button>
     </aside>
@@ -212,10 +218,10 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
           <article><small>累计 Credits</small><strong>{{ dashboard.credits || 0 }}</strong></article>
           <article><small>活跃用户</small><strong>{{ dashboard.users || 0 }}</strong></article>
         </section>
+        <AdminPlanRequests v-else-if="adminView === 'plan-requests'" :rows="planRequests" @review="reviewPlanRequest" />
         <section v-else class="panel">
           <div class="panel-head">
-            <h2>{{ adminTitles[adminView] }}</h2><button v-if="currentKind"
-              @click="openCreate(currentKind)">新增{{ labelOf(currentKind) }}</button>
+            <h2>{{ adminTitles[adminView] }}</h2><button v-if="currentKind" @click="openCreate(currentKind)">新增{{ labelOf(currentKind) }}</button>
           </div>
           <div class="table-wrap">
             <table>
@@ -262,10 +268,10 @@ onMounted(async () => { if (!loggedIn.value) return; try { if (isAdmin.value) aw
           :balance="dashboard.balance"
           @copy="copyText"
         />
+        <UserPlans v-else-if="userView === 'plans'" :plans="userPlans" :requests="planRequests" :billing="billing" @apply="applyPlan" @refresh="loadUserAll" />
         <section v-else-if="userView === 'profile'" class="panel">
           <h2>账户资料</h2>
           <dl>
-            <dt>邮箱</dt>
             <dd>{{ profile.email }}</dd>
             <dt>角色</dt>
             <dd>普通用户</dd>
