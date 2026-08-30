@@ -131,7 +131,30 @@ async function loadUserView() {
     throw e
   } finally { rowsLoading.value = false }
 }
-async function applyPlan(planId: string) { try { await request('/user/plan-requests', { method: 'POST', body: JSON.stringify({ plan_id: planId }) }); notify('套餐申请已提交'); await loadUserAll() } catch (e) { fail(e, '申请套餐失败') } }
+async function selectUser(view: UserView) {
+  userView.value = view
+  page.value = 1
+  total.value = 0
+  totalPages.value = 0
+  rows.value = []
+  rowsError.value = ''
+  error.value = ''
+  try {
+    await loadUserView()
+  } catch (e) {
+    fail(e, '加载数据失败')
+  }
+}
+
+async function applyPlan(planId: string) {
+  try {
+    await request('/user/plan-requests', { method: 'POST', body: JSON.stringify({ plan_id: planId }) })
+    notify('套餐申请已提交')
+    await loadUserAll()
+  } catch (e) {
+    fail(e, '申请套餐失败')
+  }
+}
 async function reviewPlanRequest(id: string, status: 'APPROVED' | 'REJECTED') { const note = prompt(status === 'APPROVED' ? '审核备注（可选）' : '拒绝原因（可选）') ?? ''; try { await request(`/admin/plan-requests/${id}`, { method: 'PATCH', body: JSON.stringify({ status, note }) }); notify('审核完成'); await loadAdminAll() } catch (e) { fail(e, '审核失败') } }
 async function changeUserPage(next: number) {
   if (next < 1 || (totalPages.value > 0 && next > totalPages.value) || rowsLoading.value) return
